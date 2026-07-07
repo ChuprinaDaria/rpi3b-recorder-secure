@@ -12,12 +12,6 @@
     display: flex; flex-direction: column; gap: 14px;
   }
   h1 { font-size: 18px; margin: 0 0 4px; }
-  label { font-size: 12px; color: #888; margin-bottom: -10px; }
-  input {
-    padding: 10px; font-size: 13px; font-family: monospace;
-    border: 1px solid #bbb; border-radius: 8px; width: 100%;
-    box-sizing: border-box;
-  }
   button {
     padding: 22px; font-size: 20px; border: none; border-radius: 14px;
     color: #fff; cursor: pointer;
@@ -34,11 +28,20 @@
   #dot { width: 14px; height: 14px; border-radius: 50%; background: #888; }
   #dot.on { background: #e74c3c; animation: blink 1s infinite; }
   @keyframes blink { 50% { opacity: .2; } }
-  #log { font-size: 11px; color: #888; word-break: break-all; }
+  #log { font-size: 11px; color: #888; word-break: break-all; min-height: 14px; }
   .warn {
     padding: 10px; font-size: 12px; background: #fff3cd; color: #856404;
     border-radius: 8px;
   }
+  details { font-size: 12px; color: #888; }
+  details summary { cursor: pointer; padding: 6px 0; }
+  details input {
+    display: block; width: 100%; box-sizing: border-box;
+    padding: 8px; margin: 4px 0 8px;
+    font-family: monospace; font-size: 12px;
+    border: 1px solid #bbb; border-radius: 6px;
+  }
+  details label { font-size: 11px; color: #666; }
   .debug {
     padding: 10px; font-size: 12px; background: #e8f4fd; color: #1a5a8a;
     border-radius: 8px; text-align: center;
@@ -50,18 +53,9 @@
   <h1>RPi5 відео-реєстратор</h1>
 
   <div id="unsupported" class="warn" hidden>
-    Web Bluetooth недоступний. Потрібен Chrome/Edge на Android або desktop.
-    iOS Safari не підтримує.
+    Web Bluetooth недоступний. Потрібен Chrome/Edge на Android або desktop
+    (HTTPS). iOS Safari, Firefox не підтримують.
   </div>
-
-  <label>Device name</label>
-  <input id="name" value="RPi5-CAM">
-  <label>Service UUID</label>
-  <input id="svc" value="12345678-1234-5678-1234-56789abcdef0">
-  <label>Command characteristic UUID</label>
-  <input id="chr" value="12345678-1234-5678-1234-56789abcdef1">
-  <label>Status characteristic UUID</label>
-  <input id="chrStatus" value="12345678-1234-5678-1234-56789abcdef2">
 
   <button id="conn">Підключити</button>
   <button id="rec"  disabled>● Запис</button>
@@ -70,14 +64,36 @@
   <div id="status"><span id="dot"></span><span id="label">не підключено</span></div>
   <div id="log"></div>
 
+  <details>
+    <summary>Налаштування BLE</summary>
+    <label>Device name</label>
+    <input id="name" value="RPi5-CAM">
+    <label>Service UUID</label>
+    <input id="svc" value="12345678-1234-5678-1234-56789abcdef0">
+    <label>Command characteristic UUID</label>
+    <input id="chr" value="12345678-1234-5678-1234-56789abcdef1">
+    <label>Status characteristic UUID</label>
+    <input id="chrStatus" value="12345678-1234-5678-1234-56789abcdef2">
+    <button id="saveCfg" style="background:#27ae60;padding:10px;font-size:13px">
+      Зберегти
+    </button>
+  </details>
+
   <div class="debug">
     Не бачить пристрій?
     <a href="https://googlechrome.github.io/samples/web-bluetooth/get-characteristics.html"
-       target="_blank" rel="noopener">Перевірити через Google Debugger</a>
+       target="_blank" rel="noopener">Google Debugger</a>
   </div>
 
 <script>
 "use strict";
+
+const DEFAULTS = {
+  name: "RPi5-CAM",
+  svc:  "12345678-1234-5678-1234-56789abcdef0",
+  chr:  "12345678-1234-5678-1234-56789abcdef1",
+  chrStatus: "12345678-1234-5678-1234-56789abcdef2",
+};
 
 const $ = id => document.getElementById(id);
 const log = m => { $("log").textContent = m; console.log(m); };
@@ -86,6 +102,20 @@ const setRecUI = rec => {
   $("dot").classList.toggle("on", rec);
   setLabel(rec ? "запис…" : "готово");
 };
+
+function loadCfg() {
+  const saved = JSON.parse(localStorage.getItem("bleCfg") || "{}");
+  const cfg = { ...DEFAULTS, ...saved };
+  for (const k of Object.keys(DEFAULTS)) $(k).value = cfg[k];
+  return cfg;
+}
+
+function saveCfg() {
+  const cfg = {};
+  for (const k of Object.keys(DEFAULTS)) cfg[k] = $(k).value.trim();
+  localStorage.setItem("bleCfg", JSON.stringify(cfg));
+  log("налаштування збережено");
+}
 
 if (!("bluetooth" in navigator)) {
   $("unsupported").hidden = false;
@@ -98,13 +128,13 @@ let device = null;
 
 async function connect() {
   try {
-    const name = $("name").value.trim();
-    const svc  = $("svc").value.trim().toLowerCase();
-    const cuid = $("chr").value.trim().toLowerCase();
-    const suid = $("chrStatus").value.trim().toLowerCase();
+    const cfg = loadCfg();
+    const svc  = cfg.svc.toLowerCase();
+    const cuid = cfg.chr.toLowerCase();
+    const suid = cfg.chrStatus.toLowerCase();
 
     device = await navigator.bluetooth.requestDevice({
-      filters: [{ name }],
+      filters: [{ name: cfg.name }],
       optionalServices: [svc],
     });
     log("обрано " + device.name);
@@ -142,6 +172,8 @@ async function send(byte) {
   await chrCmd.writeValue(Uint8Array.of(byte));
 }
 
+loadCfg();
+$("saveCfg").onclick = saveCfg;
 $("conn").onclick = connect;
 $("rec").onclick  = async () => { await send(0x01); setRecUI(true); };
 $("stop").onclick = async () => { await send(0x00); setRecUI(false); };
