@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RPi5 REC</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, sans-serif;
+    max-width: 380px; margin: 0 auto; padding: 24px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  label { font-size: 12px; color: #888; margin-bottom: -10px; }
+  input {
+    padding: 10px; font-size: 13px; font-family: monospace;
+    border: 1px solid #bbb; border-radius: 8px; width: 100%;
+    box-sizing: border-box;
+  }
+  button {
+    padding: 22px; font-size: 20px; border: none; border-radius: 14px;
+    color: #fff; cursor: pointer;
+  }
+  button:disabled { opacity: .35; cursor: not-allowed; }
+  #conn { background: #2980b9; }
+  #rec  { background: #c0392b; }
+  #stop { background: #555; }
+  #status {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px; border-radius: 10px; background: #f2f2f2;
+    color: #222; font-size: 14px;
+  }
+  #dot { width: 14px; height: 14px; border-radius: 50%; background: #888; }
+  #dot.on { background: #e74c3c; animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .2; } }
+  #log { font-size: 11px; color: #888; word-break: break-all; }
+  .warn {
+    padding: 10px; font-size: 12px; background: #fff3cd; color: #856404;
+    border-radius: 8px;
+  }
+  .debug {
+    padding: 10px; font-size: 12px; background: #e8f4fd; color: #1a5a8a;
+    border-radius: 8px; text-align: center;
+  }
+  .debug a { color: #1a5a8a; font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>RPi5 відео-реєстратор</h1>
+
+  <div id="unsupported" class="warn" hidden>
+    Web Bluetooth недоступний. Потрібен Chrome/Edge на Android або desktop.
+    iOS Safari не підтримує.
+  </div>
+
+  <label>Device name</label>
+  <input id="name" value="RPi5-CAM">
+  <label>Service UUID</label>
+  <input id="svc" value="12345678-1234-5678-1234-56789abcdef0">
+  <label>Command characteristic UUID</label>
+  <input id="chr" value="12345678-1234-5678-1234-56789abcdef1">
+  <label>Status characteristic UUID</label>
+  <input id="chrStatus" value="12345678-1234-5678-1234-56789abcdef2">
+
+  <button id="conn">Підключити</button>
+  <button id="rec"  disabled>● Запис</button>
+  <button id="stop" disabled>■ Стоп</button>
+
+  <div id="status"><span id="dot"></span><span id="label">не підключено</span></div>
+  <div id="log"></div>
+
+  <div class="debug">
+    Не бачить пристрій?
+    <a href="https://googlechrome.github.io/samples/web-bluetooth/get-characteristics.html"
+       target="_blank" rel="noopener">Перевірити через Google Debugger</a>
+  </div>
+
+<script>
+"use strict";
+
+const $ = id => document.getElementById(id);
+const log = m => { $("log").textContent = m; console.log(m); };
+const setLabel = t => $("label").textContent = t;
+const setRecUI = rec => {
+  $("dot").classList.toggle("on", rec);
+  setLabel(rec ? "запис…" : "готово");
+};
+
+if (!("bluetooth" in navigator)) {
+  $("unsupported").hidden = false;
+  $("conn").disabled = true;
+}
+
+let chrCmd = null;
+let chrStatus = null;
+let device = null;
+
+async function connect() {
+  try {
+    const name = $("name").value.trim();
+    const svc  = $("svc").value.trim().toLowerCase();
+    const cuid = $("chr").value.trim().toLowerCase();
+    const suid = $("chrStatus").value.trim().toLowerCase();
+
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ name }],
+      optionalServices: [svc],
+    });
+    log("обрано " + device.name);
+
+    device.addEventListener("gattserverdisconnected", () => {
+      setLabel("зв'язок втрачено");
+      $("dot").classList.remove("on");
+      $("rec").disabled = true;
+      $("stop").disabled = true;
+    });
+
+    const gatt = await device.gatt.connect();
+    const service = await gatt.getPrimaryService(svc);
+    chrCmd = await service.getCharacteristic(cuid);
+    try { chrStatus = await service.getCharacteristic(suid); } catch (_) {}
+
+    if (chrStatus) {
+      const v = await chrStatus.readValue();
+      setRecUI(v.getUint8(0) === 0x01);
+    } else {
+      setLabel("підключено");
+    }
+
+    $("rec").disabled = false;
+    $("stop").disabled = false;
+    log("підключено до " + device.name);
+  } catch (e) {
+    log("помилка: " + e.message);
+    setLabel("помилка підключення");
+  }
+}
+
+async function send(byte) {
+  if (!chrCmd) return;
+  await chrCmd.writeValue(Uint8Array.of(byte));
+}
+
+$("conn").onclick = connect;
+$("rec").onclick  = async () => { await send(0x01); setRecUI(true); };
+$("stop").onclick = async () => { await send(0x00); setRecUI(false); };
+</script>
+</body>
+</html>
