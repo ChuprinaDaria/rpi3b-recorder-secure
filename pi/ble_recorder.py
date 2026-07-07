@@ -2,6 +2,7 @@ import datetime
 import logging
 import os
 import threading
+import time
 
 from bluezero import adapter, peripheral
 from picamera2 import Picamera2
@@ -16,6 +17,7 @@ REC_DIR = "/home/pi/recordings"
 DEVICE_NAME = "RPi5-CAM"
 WIDTH, HEIGHT, FPS = 1920, 1080, 30
 BITRATE = 10_000_000
+SEGMENT_SEC = 300
 MAX_FILES = 50
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -29,7 +31,8 @@ picam2.configure(picam2.create_video_configuration(
     controls={"FrameRate": FPS},
 ))
 
-state = {"recording": False, "file": None}
+state = {"recording": False, "file": None, "segment_thread": None}
+stop_event = threading.Event()
 lock = threading.Lock()
 
 
@@ -46,16 +49,51 @@ def rotate_old_files():
             log.warning("rotate failed for %s: %s", old, e)
 
 
+def _new_segment_path():
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(REC_DIR, f"rec_{ts}.mp4")
+
+
+def _open_segment():
+    path = _new_segment_path()
+    picam2.start_recording(H264Encoder(bitrate=BITRATE), FfmpegOutput(path))
+    state["file"] = path
+    log.info("segment start -> %s", path)
+
+
+def _close_segment():
+    picam2.stop_recording()
+    log.info("segment stop  -> %s", state["file"])
+
+
+def segment_loop():
+    _open_segment()
+    while not stop_event.wait(SEGMENT_SEC):
+        try:
+            _close_segment()
+            rotate_old_files()
+            _open_segment()
+        except Exception as e:
+            log.exception("segment rollover failed: %s", e)
+            break
+    try:
+        _close_segment()
+    except Exception as e:
+        log.exception("final close failed: %s", e)
+    state["file"] = None
+
+
 def start_recording():
     with lock:
         if state["recording"]:
             return False
         rotate_old_files()
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(REC_DIR, f"rec_{ts}.mp4")
-        picam2.start_recording(H264Encoder(bitrate=BITRATE), FfmpegOutput(path))
-        state.update(recording=True, file=path)
-        log.info("REC start -> %s", path)
+        stop_event.clear()
+        t = threading.Thread(target=segment_loop, daemon=True)
+        state["segment_thread"] = t
+        state["recording"] = True
+        t.start()
+        log.info("REC start (segments=%ds)", SEGMENT_SEC)
         return True
 
 
@@ -63,10 +101,15 @@ def stop_recording():
     with lock:
         if not state["recording"]:
             return False
-        picam2.stop_recording()
-        log.info("REC stop  -> %s", state["file"])
-        state.update(recording=False, file=None)
-        return True
+        stop_event.set()
+        t = state["segment_thread"]
+    if t:
+        t.join(timeout=10)
+    with lock:
+        state["recording"] = False
+        state["segment_thread"] = None
+    log.info("REC stop")
+    return True
 
 
 def on_write(value, options):
