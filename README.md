@@ -26,9 +26,7 @@
 
 ## 2. Клонування репозиторію на Pi
 
-Заходиш на Pi по SSH (як налаштувати SSH — див. пункт 6). Далі — два способи склонувати репо. Обирай один.
-
-### 2.1. HTTPS (простіше, підходить якщо у Pi нема ключа GitHub)
+Реєстратор автономний — після налаштування живе без інтернету. Код на Pi треба залити **один раз** (плюс зрідка `git pull` коли міняється). GitHub є публічним, тож клон анонімно через HTTPS — без токенів і без ключів:
 
 ```bash
 cd ~
@@ -41,42 +39,7 @@ cd rpi5-recorder
 cd ~/rpi5-recorder && git pull
 ```
 
-Push з Pi по HTTPS вимагатиме токен (Personal Access Token, не пароль). Для реєстратора зазвичай пушити не треба — тільки читати.
-
-### 2.2. SSH (треба один раз згенерувати ключ)
-
-На Pi:
-```bash
-ssh-keygen -t ed25519 -C "rpi5-recorder@$(hostname)" -f ~/.ssh/id_ed25519 -N ""
-cat ~/.ssh/id_ed25519.pub
-```
-
-Скопіювати вивід (публічний ключ) → зайти на **https://github.com/settings/keys** → `New SSH key` → назва «rpi5-recorder» → вставити ключ.
-
-Далі перевірити коннект:
-```bash
-ssh -T git@github.com
-# Має відповісти: Hi <username>! You've successfully authenticated...
-```
-
-Клонування:
-```bash
-cd ~
-git clone git@github.com:bluebird-works/rpi5-recorder.git
-cd rpi5-recorder
-```
-
-Оновлення:
-```bash
-cd ~/rpi5-recorder && git pull
-```
-
-Якщо репо вже клоноване через HTTPS і хочеш перемкнути на SSH:
-```bash
-cd ~/rpi5-recorder
-git remote set-url origin git@github.com:bluebird-works/rpi5-recorder.git
-git remote -v   # має бути git@github.com:...
-```
+SSH-ключ до GitHub на Pi **не потрібен** — з реєстратора нічого туди не пушиться. (SSH між твоїм ноутом і Pi — це інша річ, потрібна щоб взагалі залізти на Pi, див. пункт 6.)
 
 ---
 
