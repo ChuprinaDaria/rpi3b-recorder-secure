@@ -4,3 +4,4 @@ __pycache__/
 .DS_Store
 .env
 .playwright-mcp/
+CLAUDE.md
