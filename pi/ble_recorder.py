@@ -1,13 +1,12 @@
-import datetime
 import logging
 import os
+import shutil
+import signal
+import subprocess
 import threading
 import time
 
 from bluezero import adapter, peripheral
-from picamera2 import Picamera2
-from picamera2.encoders import H264Encoder
-from picamera2.outputs import FfmpegOutput
 
 SERVICE_UUID = "12345678-1234-5678-1234-56789abcdef0"
 CHAR_UUID = "12345678-1234-5678-1234-56789abcdef1"
@@ -15,9 +14,12 @@ STATUS_UUID = "12345678-1234-5678-1234-56789abcdef2"
 
 REC_DIR = "/home/pi/recordings"
 DEVICE_NAME = "RPi5-CAM"
+VIDEO_DEV = "/dev/video0"
+INPUT_FORMAT = "mjpeg"
 WIDTH, HEIGHT, FPS = 1920, 1080, 30
 BITRATE = 10_000_000
-SEGMENT_SEC = 300
+# Довжина одного mp4-чанку в секундах. 0 = не різати, писати одним файлом.
+SEGMENT_SEC = 0
 MAX_FILES = 50
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -25,14 +27,7 @@ log = logging.getLogger("ble_recorder")
 
 os.makedirs(REC_DIR, exist_ok=True)
 
-picam2 = Picamera2()
-picam2.configure(picam2.create_video_configuration(
-    main={"size": (WIDTH, HEIGHT)},
-    controls={"FrameRate": FPS},
-))
-
-state = {"recording": False, "file": None, "segment_thread": None}
-stop_event = threading.Event()
+state = {"recording": False, "proc": None, "stop_event": None, "rot_thread": None}
 lock = threading.Lock()
 
 
@@ -49,38 +44,33 @@ def rotate_old_files():
             log.warning("rotate failed for %s: %s", old, e)
 
 
-def _new_segment_path():
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(REC_DIR, f"rec_{ts}.mp4")
+def _start_ffmpeg():
+    base = [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
+        "-f", "v4l2", "-input_format", INPUT_FORMAT,
+        "-video_size", f"{WIDTH}x{HEIGHT}", "-framerate", str(FPS),
+        "-i", VIDEO_DEV,
+        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+        "-b:v", str(BITRATE), "-pix_fmt", "yuv420p",
+    ]
+    if SEGMENT_SEC and SEGMENT_SEC > 0:
+        pattern = os.path.join(REC_DIR, "rec_%Y%m%d_%H%M%S.mp4")
+        cmd = base + [
+            "-f", "segment", "-segment_time", str(SEGMENT_SEC),
+            "-segment_format", "mp4", "-reset_timestamps", "1", "-strftime", "1",
+            pattern,
+        ]
+    else:
+        # SEGMENT_SEC=0 → один mp4 на всю сесію; SIGTERM даст ffmpeg закрити moov.
+        out = os.path.join(REC_DIR, time.strftime("rec_%Y%m%d_%H%M%S.mp4"))
+        cmd = base + ["-f", "mp4", out]
+    log.info("ffmpeg start")
+    return subprocess.Popen(cmd)
 
 
-def _open_segment():
-    path = _new_segment_path()
-    picam2.start_recording(H264Encoder(bitrate=BITRATE), FfmpegOutput(path))
-    state["file"] = path
-    log.info("segment start -> %s", path)
-
-
-def _close_segment():
-    picam2.stop_recording()
-    log.info("segment stop  -> %s", state["file"])
-
-
-def segment_loop():
-    _open_segment()
-    while not stop_event.wait(SEGMENT_SEC):
-        try:
-            _close_segment()
-            rotate_old_files()
-            _open_segment()
-        except Exception as e:
-            log.exception("segment rollover failed: %s", e)
-            break
-    try:
-        _close_segment()
-    except Exception as e:
-        log.exception("final close failed: %s", e)
-    state["file"] = None
+def _rotator_loop(stop_event):
+    while not stop_event.wait(30):
+        rotate_old_files()
 
 
 def start_recording():
@@ -88,11 +78,11 @@ def start_recording():
         if state["recording"]:
             return False
         rotate_old_files()
-        stop_event.clear()
-        t = threading.Thread(target=segment_loop, daemon=True)
-        state["segment_thread"] = t
-        state["recording"] = True
-        t.start()
+        proc = _start_ffmpeg()
+        stop_event = threading.Event()
+        rot_t = threading.Thread(target=_rotator_loop, args=(stop_event,), daemon=True)
+        rot_t.start()
+        state.update(recording=True, proc=proc, stop_event=stop_event, rot_thread=rot_t)
         log.info("REC start (segments=%ds)", SEGMENT_SEC)
         return True
 
@@ -101,13 +91,18 @@ def stop_recording():
     with lock:
         if not state["recording"]:
             return False
-        stop_event.set()
-        t = state["segment_thread"]
-    if t:
-        t.join(timeout=10)
+        proc = state["proc"]
+        stop_event = state["stop_event"]
+    stop_event.set()
+    if proc:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
     with lock:
-        state["recording"] = False
-        state["segment_thread"] = None
+        state.update(recording=False, proc=None, stop_event=None, rot_thread=None)
     log.info("REC stop")
     return True
 
@@ -129,6 +124,9 @@ def read_status(options):
 
 
 def main():
+    if not shutil.which("ffmpeg"):
+        raise SystemExit("ffmpeg not found in PATH")
+
     adapter_addr = list(adapter.Adapter.available())[0].address
     log.info("using adapter %s", adapter_addr)
 

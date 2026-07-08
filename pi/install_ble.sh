@@ -5,7 +5,10 @@ APP_DIR="/home/pi/rpi5-ble"
 SERVICE_NAME="rpi5-ble-recorder.service"
 
 apt-get update
-apt-get install -y python3-picamera2 python3-bluezero ffmpeg bluez
+apt-get install -y python3-bluezero ffmpeg bluez v4l-utils
+
+# put pi in video group so it can access /dev/video0
+usermod -aG video pi || true
 
 mkdir -p "${APP_DIR}"
 cp "$(dirname "$0")/ble_recorder.py" "${APP_DIR}/"

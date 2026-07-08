@@ -5,7 +5,9 @@ APP_DIR="/home/pi/rpi5-auto"
 SERVICE_NAME="rpi5-auto-recorder.service"
 
 apt-get update
-apt-get install -y rpicam-apps ffmpeg
+apt-get install -y ffmpeg v4l-utils
+
+usermod -aG video pi || true
 
 mkdir -p "${APP_DIR}"
 install -m 755 "$(dirname "$0")/autostart.sh" "${APP_DIR}/autostart.sh"

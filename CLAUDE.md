@@ -15,18 +15,18 @@
 **B. Auto-record** (`pi/autostart.sh`)
 Запис стартує при подачі живлення. Зупинка = вимкнення живлення (SIGTERM → graceful close mp4).
 
-Обидва режими пишуть **5-хвилинні mp4-чанки** з ротацією старих файлів (макс 50). Формат імені: `rec_YYYYMMDD_HHMMSS.mp4`.
+Обидва режими підтримують **розбиття на mp4-чанки** через константу `SEGMENT_SEC` (секунди). Дефолт `0` = не різати, писати одним файлом на всю сесію. Ротація старих файлів (макс 50). Формат імені: `rec_YYYYMMDD_HHMMSS.mp4`.
 
 ## Технічні рішення
-- **H.264 софтверний.** Pi 5 не має HW-енкодера. 1080p30 @ 10 Mbps ≈ 100% одного ядра, працює стабільно. Вище не піднімати без тестів.
-- **FfmpegOutput** (Picamera2) для одразу-в-mp4 муксингу — не raw h264.
-- **rpicam-vid** з `--codec libav --libav-format mp4` для sh-варіанту (Bookworm). На Bullseye — `libcamera-vid`.
-- **BLE:** bluezero (BlueZ через D-Bus). Один сервіс, дві характеристики: write (cmd) + read (status).
+- **Камера — USB (UVC), не CSI.** Читаємо через V4L2 (`/dev/video0`). Дефолтний `INPUT_FORMAT=mjpeg` — так більшість веб-камер вміщає 1080p30 в USB2.0. Якщо камера видає тільки `yuyv422`, змінити змінну.
+- **H.264 софтверний (libx264 preset=ultrafast).** Pi 5 не має HW-енкодера, а UVC-стрім із камери сирий/MJPEG. 1080p30 @ 10 Mbps ≈ 100% одного ядра.
+- **ffmpeg segment muxer** (`-f segment -segment_time N -strftime 1`) сам ріже на mp4-чанки без розривів, якщо `SEGMENT_SEC > 0`. Якщо `SEGMENT_SEC = 0`, юзаємо звичайний `-f mp4` в один файл. Не пишемо raw h264, одразу муксимо в mp4.
+- **BLE:** bluezero (BlueZ через D-Bus). Один сервіс, дві характеристики: write (cmd) + read (status). Python-код стартує/зупиняє ffmpeg-subprocess.
 - **Web Bluetooth вимагає HTTPS.** Тому `index.html` — на GitHub Pages, не на Pi.
 
 ## Стек
-- Python 3.11+ (picamera2, bluezero)
-- Bash (rpicam-apps)
+- Python 3.11+ (bluezero, subprocess → ffmpeg)
+- Bash + ffmpeg (v4l2 input, libx264, segment muxer)
 - Vanilla JS (Web Bluetooth API, без фреймворків)
 - systemd для автозапуску
 - GitHub Pages для клієнта
@@ -44,6 +44,7 @@ Status:  12345678-1234-5678-1234-56789abcdef2  (read, 0x01/0x00)
 - Не пропонувати raspap / hostapd — цей проєкт свідомо йде через Web Bluetooth, не hotspot.
 - Не додавати превʼю відео на клієнтську сторінку — MJPEG-стрім конфліктує з активним записом.
 - Не тримати відео в репо (`.gitignore` вже блокує `*.mp4`).
+- Не тягнути назад `picamera2` / `rpicam-vid` — тестова камера USB, CSI відсутня.
 
 ## Деплой
 ```bash
