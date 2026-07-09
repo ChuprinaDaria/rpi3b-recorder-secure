@@ -44,26 +44,38 @@ def rotate_old_files():
             log.warning("rotate failed for %s: %s", old, e)
 
 
+# Робить mp4 «живучим» до крешу: якщо процес вб'ють / вирубають живлення без SIGTERM,
+# файл лишається програвабельним — moov не потрібен, дані самоописні по фрагментах.
+FRAG_FLAGS = "+frag_keyframe+empty_moov+default_base_moof"
+
+
 def _start_ffmpeg():
     base = [
         "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
+        "-thread_queue_size", "512",
         "-f", "v4l2", "-input_format", INPUT_FORMAT,
         "-video_size", f"{WIDTH}x{HEIGHT}", "-framerate", str(FPS),
         "-i", VIDEO_DEV,
-        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+        "-c:v", "libx264", "-preset", "ultrafast",
         "-b:v", str(BITRATE), "-pix_fmt", "yuv420p",
     ]
     if SEGMENT_SEC and SEGMENT_SEC > 0:
+        # Segment muxer вимагає closed GOP розміру segment_time * fps, інакше сегменти
+        # можуть починатись не з keyframe (ffmpeg-formats docs, 4.71.1).
+        gop = FPS * SEGMENT_SEC
         pattern = os.path.join(REC_DIR, "rec_%Y%m%d_%H%M%S.mp4")
         cmd = base + [
+            "-flags", "+cgop", "-g", str(gop), "-keyint_min", str(gop),
+            "-force_key_frames", f"expr:gte(t,n_forced*{SEGMENT_SEC})",
             "-f", "segment", "-segment_time", str(SEGMENT_SEC),
-            "-segment_format", "mp4", "-reset_timestamps", "1", "-strftime", "1",
+            "-segment_format", "mp4",
+            "-segment_format_options", f"movflags={FRAG_FLAGS}",
+            "-reset_timestamps", "1", "-strftime", "1",
             pattern,
         ]
     else:
-        # SEGMENT_SEC=0 → один mp4 на всю сесію; SIGTERM даст ffmpeg закрити moov.
         out = os.path.join(REC_DIR, time.strftime("rec_%Y%m%d_%H%M%S.mp4"))
-        cmd = base + ["-f", "mp4", out]
+        cmd = base + ["-movflags", FRAG_FLAGS, "-f", "mp4", out]
     log.info("ffmpeg start")
     return subprocess.Popen(cmd)
 

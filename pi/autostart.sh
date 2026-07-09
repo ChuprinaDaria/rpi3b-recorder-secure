@@ -35,23 +35,32 @@ trap 'kill "${ROT_PID}" 2>/dev/null; exit 0' TERM INT
 
 echo "recorder started, dir=${REC_DIR}, dev=${VIDEO_DEV}, segment=${SEGMENT_SEC}s"
 
+FRAG_FLAGS="+frag_keyframe+empty_moov+default_base_moof"
+
 if [ "${SEGMENT_SEC}" -gt 0 ]; then
+  GOP=$((FPS * SEGMENT_SEC))
   exec ffmpeg -hide_banner -loglevel warning -nostdin \
+    -thread_queue_size 512 \
     -f v4l2 -input_format "${INPUT_FORMAT}" \
     -video_size "${WIDTH}x${HEIGHT}" -framerate "${FPS}" \
     -i "${VIDEO_DEV}" \
-    -c:v libx264 -preset ultrafast -tune zerolatency \
+    -c:v libx264 -preset ultrafast \
+    -flags +cgop -g "${GOP}" -keyint_min "${GOP}" \
+    -force_key_frames "expr:gte(t,n_forced*${SEGMENT_SEC})" \
     -b:v "${BITRATE}" -pix_fmt yuv420p \
     -f segment -segment_time "${SEGMENT_SEC}" \
     -segment_format mp4 -reset_timestamps 1 -strftime 1 \
+    -segment_format_options "movflags=${FRAG_FLAGS}" \
     "${REC_DIR}/rec_%Y%m%d_%H%M%S.mp4"
 else
   OUT="${REC_DIR}/rec_$(date +%Y%m%d_%H%M%S).mp4"
   exec ffmpeg -hide_banner -loglevel warning -nostdin \
+    -thread_queue_size 512 \
     -f v4l2 -input_format "${INPUT_FORMAT}" \
     -video_size "${WIDTH}x${HEIGHT}" -framerate "${FPS}" \
     -i "${VIDEO_DEV}" \
-    -c:v libx264 -preset ultrafast -tune zerolatency \
+    -c:v libx264 -preset ultrafast \
     -b:v "${BITRATE}" -pix_fmt yuv420p \
+    -movflags "${FRAG_FLAGS}" \
     -f mp4 "${OUT}"
 fi
