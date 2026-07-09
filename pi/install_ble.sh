@@ -5,7 +5,13 @@ APP_DIR="/home/pi/rpi5-ble"
 SERVICE_NAME="rpi5-ble-recorder.service"
 
 apt-get update
-apt-get install -y python3-bluezero ffmpeg bluez v4l-utils
+apt-get install -y ffmpeg bluez v4l-utils python3-pip python3-dbus python3-gi
+
+# bluezero: try apt first, fall back to pip (PEP 668 override — dedicated Pi)
+if ! apt-get install -y python3-bluezero 2>/dev/null; then
+  echo "python3-bluezero not in apt, installing via pip"
+  pip3 install --break-system-packages bluezero
+fi
 
 # put pi in video group so it can access /dev/video0
 usermod -aG video pi || true
