@@ -1,5 +1,6 @@
 import logging
 import os
+import pathlib
 import shutil
 import signal
 import subprocess
@@ -12,22 +13,26 @@ SERVICE_UUID = "12345678-1234-5678-1234-56789abcdef0"
 CHAR_UUID = "12345678-1234-5678-1234-56789abcdef1"
 STATUS_UUID = "12345678-1234-5678-1234-56789abcdef2"
 
-REC_DIR = "/home/pi/recordings"
-DEVICE_NAME = "RPi5-CAM"
-VIDEO_DEV = "/dev/video0"
-INPUT_FORMAT = "mjpeg"
-WIDTH, HEIGHT, FPS = 1920, 1080, 30
-BITRATE = 10_000_000
+REC_DIR = os.environ.get("REC_DIR", os.path.expanduser("~/recordings"))
+DEVICE_NAME = os.environ.get("DEVICE_NAME", "RPi5-CAM")
+WIDTH = int(os.environ.get("WIDTH", 1920))
+HEIGHT = int(os.environ.get("HEIGHT", 1080))
+FPS = int(os.environ.get("FPS", 30))
+BITRATE = int(os.environ.get("BITRATE", 10_000_000))
+# manual + lens_position 0 = фіксований фокус на безкінечність.
+AUTOFOCUS_MODE = os.environ.get("AUTOFOCUS_MODE", "manual")
+LENS_POSITION = os.environ.get("LENS_POSITION", "0")
 # Довжина одного mp4-чанку в секундах. 0 = не різати, писати одним файлом.
-SEGMENT_SEC = 0
-MAX_FILES = 50
+ENCODER = os.environ.get("ENCODER", "auto")
+SEGMENT_SEC = int(os.environ.get("SEGMENT_SEC", 0))
+MAX_FILES = int(os.environ.get("MAX_FILES", 50))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("ble_recorder")
 
 os.makedirs(REC_DIR, exist_ok=True)
 
-state = {"recording": False, "proc": None, "stop_event": None, "rot_thread": None}
+state = {"recording": False, "cam": None, "ff": None, "stop_event": None, "rot_thread": None}
 lock = threading.Lock()
 
 
@@ -49,35 +54,83 @@ def rotate_old_files():
 FRAG_FLAGS = "+frag_keyframe+empty_moov+default_base_moof"
 
 
-def _start_ffmpeg():
-    base = [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
-        "-thread_queue_size", "512",
-        "-f", "v4l2", "-input_format", INPUT_FORMAT,
-        "-video_size", f"{WIDTH}x{HEIGHT}", "-framerate", str(FPS),
-        "-i", VIDEO_DEV,
-        "-c:v", "libx264", "-preset", "ultrafast",
-        "-b:v", str(BITRATE), "-pix_fmt", "yuv420p",
+def _use_hw_encoder():
+    """Pi 4 має апаратний H.264 (bcm2835-codec), Pi 5 — ні, там кодує CPU.
+
+    ENCODER=software треба примусово для роздільностей ширших за 1920.
+    """
+    if ENCODER != "auto":
+        return ENCODER == "hardware"
+    return any(
+        p.read_text().strip() == "bcm2835-codec-encode"
+        for p in pathlib.Path("/sys/class/video4linux").glob("*/name")
+    )
+
+
+def _start_pipeline():
+    """rpicam-vid → ffmpeg → mp4."""
+    # Сегмент ріжеться тільки по keyframe, тому GOP = довжині сегмента.
+    intra = FPS * SEGMENT_SEC if SEGMENT_SEC > 0 else FPS
+    cam_cmd = [
+        "rpicam-vid", "-t", "0", "-n",
+        "--width", str(WIDTH), "--height", str(HEIGHT),
+        "--framerate", str(FPS),
+        "--autofocus-mode", AUTOFOCUS_MODE,
     ]
-    if SEGMENT_SEC and SEGMENT_SEC > 0:
-        # Segment muxer вимагає closed GOP розміру segment_time * fps, інакше сегменти
-        # можуть починатись не з keyframe (ffmpeg-formats docs, 4.71.1).
-        gop = FPS * SEGMENT_SEC
-        pattern = os.path.join(REC_DIR, "rec_%Y%m%d_%H%M%S.mp4")
-        cmd = base + [
-            "-flags", "+cgop", "-g", str(gop), "-keyint_min", str(gop),
-            "-force_key_frames", f"expr:gte(t,n_forced*{SEGMENT_SEC})",
+    if AUTOFOCUS_MODE == "manual":
+        cam_cmd += ["--lens-position", LENS_POSITION]
+
+    ff_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin"]
+    hardware = _use_hw_encoder()
+    if hardware:
+        cam_cmd += [
+            "--bitrate", str(BITRATE),
+            "--codec", "h264", "--inline", "--intra", str(intra),
+        ]
+        ff_cmd += [
+            "-fflags", "+genpts", "-r", str(FPS), "-f", "h264", "-i", "-",
+            "-c", "copy",
+        ]
+    else:
+        # Софтверний шлях: камера віддає сирий YUV, кодує ffmpeg. Через libav
+        # всередині rpicam-vid не йдемо — його elementary stream сегментний
+        # муксер не ріже (кейфрейми є, але поділ не відбувається).
+        cam_cmd += ["--codec", "yuv420"]
+        ff_cmd += [
+            "-f", "rawvideo", "-pix_fmt", "yuv420p",
+            "-s", f"{WIDTH}x{HEIGHT}", "-r", str(FPS), "-i", "-",
+            "-c:v", "libx264", "-preset", "ultrafast",
+            "-b:v", str(BITRATE), "-pix_fmt", "yuv420p",
+        ]
+        if SEGMENT_SEC > 0:
+            ff_cmd += [
+                "-flags", "+cgop", "-g", str(intra), "-keyint_min", str(intra),
+                "-force_key_frames", f"expr:gte(t,n_forced*{SEGMENT_SEC})",
+            ]
+    cam_cmd += ["-o", "-"]
+
+    if SEGMENT_SEC > 0:
+        ff_cmd += [
             "-f", "segment", "-segment_time", str(SEGMENT_SEC),
             "-segment_format", "mp4",
             "-segment_format_options", f"movflags={FRAG_FLAGS}",
             "-reset_timestamps", "1", "-strftime", "1",
-            pattern,
+            os.path.join(REC_DIR, "rec_%Y%m%d_%H%M%S.mp4"),
         ]
     else:
-        out = os.path.join(REC_DIR, time.strftime("rec_%Y%m%d_%H%M%S.mp4"))
-        cmd = base + ["-movflags", FRAG_FLAGS, "-f", "mp4", out]
-    log.info("ffmpeg start")
-    return subprocess.Popen(cmd)
+        ff_cmd += [
+            "-movflags", FRAG_FLAGS, "-f", "mp4",
+            os.path.join(REC_DIR, time.strftime("rec_%Y%m%d_%H%M%S.mp4")),
+        ]
+
+    cam = subprocess.Popen(cam_cmd, stdout=subprocess.PIPE)
+    ff = subprocess.Popen(ff_cmd, stdin=cam.stdout)
+    cam.stdout.close()
+    log.info(
+        "pipeline start %dx%d@%d encoder=%s af=%s",
+        WIDTH, HEIGHT, FPS, "hardware" if hardware else "software", AUTOFOCUS_MODE,
+    )
+    return cam, ff
 
 
 def _rotator_loop(stop_event):
@@ -90,11 +143,11 @@ def start_recording():
         if state["recording"]:
             return False
         rotate_old_files()
-        proc = _start_ffmpeg()
+        cam, ff = _start_pipeline()
         stop_event = threading.Event()
         rot_t = threading.Thread(target=_rotator_loop, args=(stop_event,), daemon=True)
         rot_t.start()
-        state.update(recording=True, proc=proc, stop_event=stop_event, rot_thread=rot_t)
+        state.update(recording=True, cam=cam, ff=ff, stop_event=stop_event, rot_thread=rot_t)
         log.info("REC start (segments=%ds)", SEGMENT_SEC)
         return True
 
@@ -103,18 +156,27 @@ def stop_recording():
     with lock:
         if not state["recording"]:
             return False
-        proc = state["proc"]
+        cam = state["cam"]
+        ff = state["ff"]
         stop_event = state["stop_event"]
     stop_event.set()
-    if proc:
-        proc.send_signal(signal.SIGTERM)
+    # Валимо тільки камеру: ffmpeg бачить EOF, дописує moov і виходить сам.
+    if cam:
+        cam.send_signal(signal.SIGTERM)
         try:
-            proc.wait(timeout=10)
+            cam.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+            cam.kill()
+            cam.wait(timeout=5)
+    if ff:
+        try:
+            ff.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            log.warning("ffmpeg hung after EOF, killing")
+            ff.kill()
+            ff.wait(timeout=5)
     with lock:
-        state.update(recording=False, proc=None, stop_event=None, rot_thread=None)
+        state.update(recording=False, cam=None, ff=None, stop_event=None, rot_thread=None)
     log.info("REC stop")
     return True
 
@@ -136,8 +198,9 @@ def read_status(options):
 
 
 def main():
-    if not shutil.which("ffmpeg"):
-        raise SystemExit("ffmpeg not found in PATH")
+    for tool in ("ffmpeg", "rpicam-vid"):
+        if not shutil.which(tool):
+            raise SystemExit(f"{tool} not found in PATH")
 
     adapter_addr = list(adapter.Adapter.available())[0].address
     log.info("using adapter %s", adapter_addr)

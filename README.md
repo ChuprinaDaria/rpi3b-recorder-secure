@@ -1,11 +1,17 @@
 # rpi5-recorder
 
-Відео-реєстратор на Raspberry Pi 5 з USB-камерою (UVC). Два незалежні режими:
+Відео-реєстратор на Raspberry Pi 4 / Pi 5 з CSI-камерою **Camera Module 3 (Sony IMX708)**. Два незалежні режими:
 
 - **A. BLE web control** — старт/стоп зі смартфона через Web Bluetooth
 - **B. Auto-record** — запис починається одразу після подачі живлення
 
-Обидва режими пишуть `mp4` в `/home/pi/recordings/` з ротацією (макс 50 файлів). Довжина одного файлу задається константою `SEGMENT_SEC` (сек). Дефолт `0` = **не різати**, писати одним файлом на всю сесію.
+Обидва режими пишуть `mp4` в `~/recordings/` з ротацією (макс 50 файлів). Довжина одного файлу задається змінною `SEGMENT_SEC` (сек). Дефолт `0` = **не різати**, писати одним файлом на всю сесію.
+
+Енкодер обирається автоматично під залізо:
+- **Pi 4** має апаратний H.264 (`h264_v4l2m2m`) — `rpicam-vid` віддає готовий elementary stream, ffmpeg тільки муксить його в mp4 без перекодування. CPU майже вільний.
+- **Pi 5** апаратного енкодера не має — камера віддає сирий YUV, кодує ffmpeg (libx264 ultrafast).
+
+Обидва шляхи дають однаковий результат: 1080p30 без дропів, сегменти рівно по `SEGMENT_SEC`. Фокус за замовчуванням — **фіксована безкінечність**.
 
 Веб-сторінка клієнта: **https://bluebird-works.github.io/rpi5-recorder/**
 
@@ -15,12 +21,31 @@
 
 | Компонент | Мінімум |
 |---|---|
-| Raspberry Pi 5 | будь-яка модель |
+| Raspberry Pi 4 або 5 | 2 GB+, Raspberry Pi OS / Debian 12+ |
 | SD-карта | 32 GB+ (краще A2) |
-| USB-веб-камера | UVC, з підтримкою MJPEG 1080p30 (перевіряй через `v4l2-ctl --list-formats`) |
-| Живлення | 5 V / 5 A офіційний БЖ |
+| CSI-камера | Camera Module 3 (IMX708). Перевірка: `rpicam-hello --list-cameras` |
+| Живлення | офіційний БЖ (Pi 4 — 5 V / 3 A) |
 | Мережа | тільки для першого налаштування (SSH). Далі BLE — офлайн. |
 | Смартфон/ноутбук | Android Chrome/Edge або desktop Chrome/Edge/Opera. **iOS Safari та Firefox — не працюють** (немає Web Bluetooth). |
+
+### Що має стояти на самій Pi
+
+Ставиться автоматично інсталяторами, руками нічого доставляти не треба:
+
+| Пакет | Навіщо | Хто ставить |
+|---|---|---|
+| `rpicam-apps` | `rpicam-vid` — захоплення з CSI-камери + апаратний H.264 | обидва режими |
+| `ffmpeg` | муксинг elementary stream у mp4, нарізка на сегменти | обидва режими |
+| `bluez` | `bluetoothd` (GATT-сервер) + `btmgmt` | режим A |
+| `python3-bluezero` | Python-обгортка BlueZ через D-Bus. Немає в apt Debian 13 → ставиться через `pip3 --break-system-packages` | режим A |
+| `python3-dbus`, `python3-gi` | залежності bluezero | режим A |
+
+Плюс інсталятор сам:
+- додає користувача в групу `video` (доступ до камери);
+- знімає `rfkill` з Bluetooth і піднімає `hci0` (на свіжому образі адаптер часто лежить `DOWN`);
+- створює systemd-юніт з автозапуском на буті.
+
+Перевірити все разом — `setup/verify.sh`.
 
 ---
 
@@ -45,7 +70,7 @@ SSH-ключ до GitHub на Pi **не потрібен** — з реєстра
 
 ## 3. Встановлення
 
-**Обери один режим.** Обидва одночасно ставити не варто — будуть битися за `/dev/video0`.
+**Обери один режим.** Обидва одночасно ставити не варто — будуть битися за камеру.
 
 ### 3.1. Режим A — BLE web control
 
@@ -55,8 +80,8 @@ sudo bash pi/install_ble.sh
 ```
 
 Що робить скрипт:
-- ставить `python3-bluezero`, `ffmpeg`, `bluez`, `v4l-utils`
-- копіює `ble_recorder.py` в `/home/pi/rpi5-ble/`
+- ставить `python3-bluezero`, `ffmpeg`, `rpicam-apps`, `bluez`
+- копіює `ble_recorder.py` в `~/rpi5-ble/`
 - створює systemd-сервіс `rpi5-ble-recorder.service`
 - вмикає автозапуск сервісу при бутстапі
 
@@ -76,15 +101,15 @@ sudo bash pi/install_autostart.sh
 ```
 
 Що робить скрипт:
-- ставить `ffmpeg`, `v4l-utils`
-- копіює `autostart.sh` в `/home/pi/rpi5-auto/`
+- ставить `ffmpeg`, `rpicam-apps`
+- копіює `autostart.sh` в `~/rpi5-auto/`
 - створює systemd-сервіс `rpi5-auto-recorder.service`
 - вмикає автозапуск при бутстапі
 
 Перевірка:
 ```bash
 sudo systemctl status rpi5-auto-recorder
-ls -la /home/pi/recordings/
+ls -la ~/recordings/
 ```
 
 Файли повинні зʼявлятись одразу після старту сервісу.
@@ -112,11 +137,11 @@ ls -la /home/pi/recordings/
 
 Плагін-плей:
 - **Живимо Pi** → через ~15 с починається запис.
-- **Знімаємо живлення** → systemd надсилає SIGTERM → ffmpeg закриває mp4 → shutdown. Останній файл не зіпсований.
+- **Знімаємо живлення** → systemd надсилає SIGTERM → скрипт валить `rpicam-vid`, ffmpeg добиває mp4 по EOF → shutdown. Останній файл не зіпсований.
 
 Забрати відео:
 ```bash
-scp pi@<pi-ip>:/home/pi/recordings/*.mp4 ./
+scp pi@<pi-ip>:~/recordings/*.mp4 ./
 ```
 
 ---
@@ -171,22 +196,22 @@ sudo systemctl restart ssh
 
 ## 7. Конфігурація
 
-Всі константи — на початку файлів. Значення нижче = дефолти.
+Обидва режими читають однакові змінні оточення — задаються при старті запису, код правити не треба.
 
-### `pi/ble_recorder.py`
-```python
-REC_DIR = "/home/pi/recordings"
-DEVICE_NAME = "RPi5-CAM"                 # ім'я в BLE advertising
-VIDEO_DEV = "/dev/video0"
-INPUT_FORMAT = "mjpeg"                   # або "yuyv422" якщо камера не вміє MJPEG
-WIDTH, HEIGHT, FPS = 1920, 1080, 30
-BITRATE = 10_000_000                     # 10 Mbps
-SEGMENT_SEC = 0                          # 0 = один файл на сесію; >0 = чанки по N сек
-MAX_FILES = 50                           # старі файли ротуються
-```
+| Змінна | Дефолт | Що робить |
+|---|---|---|
+| `WIDTH` / `HEIGHT` | `1920` / `1080` | роздільність. **Вище 1920 по ширині HW-енкодер не вміє** |
+| `FPS` | `30` | кадрів за секунду |
+| `BITRATE` | `10000000` | 10 Mbps |
+| `AUTOFOCUS_MODE` | `manual` | `manual`, `auto` або `continuous` |
+| `LENS_POSITION` | `0` | тільки для `manual`. `0` = безкінечність, `default` = гіперфокал |
+| `ENCODER` | `auto` | `auto` / `hardware` / `software`. `auto` визначає наявність `bcm2835-codec` — Pi 4 → апаратний, Pi 5 → софтверний |
+| `SEGMENT_SEC` | `0` | `0` = один файл на сесію; `>0` = чанки по N сек |
+| `REC_DIR` | `~/recordings` | куди писати |
+| `MAX_FILES` | `50` | скільки файлів тримати |
+| `FREE_MB_MIN` | `500` | нижче цього вільного місця — примусова ротація (тільки режим B) |
 
-### `pi/autostart.sh`
-Ті ж змінні, але задаються через env. Приклад — писати чанки по 5 хвилин:
+Змінити на живому сервісі — писати чанки по 5 хвилин:
 ```bash
 sudo systemctl edit rpi5-auto-recorder
 # додати:
@@ -194,6 +219,23 @@ sudo systemctl edit rpi5-auto-recorder
 # Environment=SEGMENT_SEC=300
 sudo systemctl restart rpi5-auto-recorder
 ```
+
+Разово, без systemd:
+```bash
+REC_DIR=/tmp/test SEGMENT_SEC=10 LENS_POSITION=0 bash pi/autostart.sh
+```
+
+### Фокус
+`AUTOFOCUS_MODE=manual` + `LENS_POSITION=0` — лінза жорстко на безкінечність, автофокус не смикається під час запису. Це дефолт: для реєстратора «різко все, що далі кількох метрів» кращий за автофокус, який перефокусовується на кожну зміну сцени.
+
+Якщо треба різкість на близькій дистанції — `LENS_POSITION` задається як **обернена відстань** (діоптрії): `0.5` ≈ 2 м, `1` ≈ 1 м, `2` ≈ 0.5 м.
+
+### Роздільність вище 1080p
+Апаратний енкодер Pi 4 обмежений 1920 по ширині, тому для ширших кадрів треба явно `ENCODER=software`:
+```bash
+WIDTH=2304 HEIGHT=1296 ENCODER=software bash pi/autostart.sh
+```
+Заміряно на Pi 4 / `2304x1296`: софтверний libx264 тримає 30 fps, але грів чіп до 76°C проти 62°C на апаратному — без активного охолодження на довгому записі впреться в тротлінг. Повний сенсорний режим `4608x2592` видав 7.9 fps замість 14 — непридатний. На Pi 5 запас більший, але окремо не міряний.
 
 ### UUID (сервіс і характеристики BLE)
 Дефолтні placeholder-и — у трьох місцях:
@@ -216,14 +258,31 @@ sudo hciconfig                    # має бути UP RUNNING
 sudo journalctl -u rpi5-ble-recorder -n 50
 ```
 
-**Запис не стартує (BLE підʼєднаний, кнопка натиснута, але файлів нема)** — типово `/dev/video0` недоступний:
+**Запис не стартує (BLE підʼєднаний, кнопка натиснута, але файлів нема)** — типово камера не бачиться:
 ```bash
-groups pi | grep -o video          # має вивести "video"
-ffmpeg -f v4l2 -list_formats all -i /dev/video0
+rpicam-hello --list-cameras        # має показати imx708
+groups | grep -o video             # має вивести "video"
 ```
-Якщо `video` немає в групах — виконати `sudo usermod -aG video pi && sudo reboot`.
+Якщо `video` немає в групах — `sudo usermod -aG video $USER && sudo reboot`.
+Якщо камери нема в списку — перевірити шлейф CSI (контактами до плати) і `dmesg | grep imx708`.
 
-**Файли є, але не програються (moov-атом відсутній)** — це станеться якщо процес вбити через `SIGKILL` замість `SIGTERM`. Systemd надсилає SIGTERM за замовчуванням, тож проблема тільки якщо hard-power-off посеред запису **І** `SEGMENT_SEC=0`. Для протидії — виставити `SEGMENT_SEC=300` (втратиш максимум 5 хв).
+**`ERROR: *** no cameras available ***`** — камеру вже тримає інший процес. Обидва сервіси одночасно не ставити: `systemctl status rpi5-ble-recorder rpi5-auto-recorder`.
+
+**У логах `Timestamps are unset in a packet`** — косметично, ігнорувати. Вилазить один раз на перший пакет raw h264; тривалість і fps у готовому файлі коректні.
+
+**Файли є, але не програються (moov-атом відсутній)** — станеться якщо процес вбити через `SIGKILL` замість `SIGTERM`. Systemd надсилає SIGTERM за замовчуванням, тож проблема тільки при hard-power-off посеред запису. Пом'якшено фрагментованим mp4 (`+frag_keyframe+empty_moov`) — файл лишається програвабельним і без moov.
+
+**Пристрій `RPi5-CAM` не видно у сканері телефона.** Спершу перевір, що реклама реально в ефірі:
+```bash
+sudo btmgmt advinfo | grep -i "instances list"    # має бути "1 item", а не "0 items"
+```
+Якщо `0 items` — не піднявся обхід із `pi/ble_advertise.sh`, дивись логи `journalctl -u rpi5-ble-recorder`. У нормі там є рядок `Instance added: 1`.
+
+Чому взагалі обхід: контролер Pi 4 (CYW43455) не підтримує LE Extended Advertising, а BlueZ 5.82 реєструє рекламу тільки через розширений mgmt-шлях і отримує від ядра `Invalid Parameters (0x0d)`. Через D-Bus рекламу підняти неможливо — bluezero отримує `org.bluez.Error.Failed`. Тому інстанс створюється напряму legacy-шляхом через `btmgmt`, а GATT-сервер лишається за `bluetoothd`. Деталі — в шапці `pi/ble_advertise.sh`.
+
+У логах сервісу через це завжди є нешкідливий рядок від bluezero про невдалу реєстрацію реклами — це очікувано, GATT при цьому працює.
+
+**BLE — це радіо на ~10 метрів.** Ні Tailscale, ні SSH тут не допоможуть: щоб підключитись зі смартфона, треба фізично бути поруч із Pi.
 
 **Web Bluetooth debugger від Google** — лінк прямо на сторінці клієнта внизу.
 
@@ -244,7 +303,8 @@ sudo bash pi/install_autostart.sh && sudo systemctl restart rpi5-auto-recorder
 
 ## 10. Що НЕ підтримується
 
-- CSI-камери (Raspberry Camera Module) — код заточений під UVC/USB, не використовує `picamera2`.
-- WebUSB — iOS не підтримує, Pi 5 не в USB-gadget режимі.
+- USB/UVC-камери — код заточений під CSI через `rpicam-vid`, входу з `/dev/video0` немає.
+- Роздільність вище 1920 по ширині на апаратному енкодері.
+- WebUSB — iOS не підтримує, Pi не в USB-gadget режимі.
 - Wi-Fi hotspot / raspap — свідомо не робимо, ідея проєкту саме в тому, що керування йде через BLE без будь-якого налаштування мережі з боку користувача.
 - iOS Safari клієнт — Apple не запровадила Web Bluetooth.

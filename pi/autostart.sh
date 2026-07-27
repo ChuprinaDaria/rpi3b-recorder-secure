@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REC_DIR="${REC_DIR:-/home/pi/recordings}"
-VIDEO_DEV="${VIDEO_DEV:-/dev/video0}"
-INPUT_FORMAT="${INPUT_FORMAT:-mjpeg}"
+REC_DIR="${REC_DIR:-${HOME}/recordings}"
 WIDTH="${WIDTH:-1920}"
 HEIGHT="${HEIGHT:-1080}"
 FPS="${FPS:-30}"
 BITRATE="${BITRATE:-10000000}"
+AUTOFOCUS_MODE="${AUTOFOCUS_MODE:-manual}"
+LENS_POSITION="${LENS_POSITION:-0}"
 SEGMENT_SEC="${SEGMENT_SEC:-0}"
 MAX_FILES="${MAX_FILES:-50}"
 FREE_MB_MIN="${FREE_MB_MIN:-500}"
@@ -29,38 +29,93 @@ rotate_loop() {
   done
 }
 
-rotate_loop &
-ROT_PID=$!
-trap 'kill "${ROT_PID}" 2>/dev/null; exit 0' TERM INT
+# Сегмент ріжеться тільки по keyframe, тому GOP має дорівнювати довжині сегмента.
+if [ "${SEGMENT_SEC}" -gt 0 ]; then
+  INTRA=$((FPS * SEGMENT_SEC))
+else
+  INTRA="${FPS}"
+fi
 
-echo "recorder started, dir=${REC_DIR}, dev=${VIDEO_DEV}, segment=${SEGMENT_SEC}s"
+CAM=(rpicam-vid -t 0 -n
+  --width "${WIDTH}" --height "${HEIGHT}" --framerate "${FPS}"
+  --autofocus-mode "${AUTOFOCUS_MODE}")
 
+# lens-position має сенс лише в manual: 0 = безкінечність.
+if [ "${AUTOFOCUS_MODE}" = "manual" ]; then
+  CAM+=(--lens-position "${LENS_POSITION}")
+fi
+
+# Pi 4 має апаратний H.264 (bcm2835-codec), Pi 5 — ні, там кодує CPU.
+# ENCODER=software треба примусово для роздільностей ширших за 1920.
+ENCODER="${ENCODER:-auto}"
+if [ "${ENCODER}" = auto ]; then
+  if grep -qs bcm2835-codec-encode /sys/class/video4linux/*/name; then
+    ENCODER=hardware
+  else
+    ENCODER=software
+  fi
+fi
+
+if [ "${ENCODER}" = hardware ]; then
+  CAM+=(--bitrate "${BITRATE}" --codec h264 --inline --intra "${INTRA}")
+else
+  # Софтверний шлях: камера віддає сирий YUV, кодує ffmpeg. Через libav
+  # всередині rpicam-vid не йдемо — його elementary stream сегментний
+  # муксер не ріже (кейфрейми є, але поділ не відбувається).
+  CAM+=(--codec yuv420)
+fi
+CAM+=(-o -)
+
+# Робить mp4 «живучим» до крешу: якщо живлення вирубають без SIGTERM,
+# файл лишається програвабельним — moov не потрібен.
 FRAG_FLAGS="+frag_keyframe+empty_moov+default_base_moof"
 
-if [ "${SEGMENT_SEC}" -gt 0 ]; then
-  GOP=$((FPS * SEGMENT_SEC))
-  exec ffmpeg -hide_banner -loglevel warning -nostdin \
-    -thread_queue_size 512 \
-    -f v4l2 -input_format "${INPUT_FORMAT}" \
-    -video_size "${WIDTH}x${HEIGHT}" -framerate "${FPS}" \
-    -i "${VIDEO_DEV}" \
-    -c:v libx264 -preset ultrafast \
-    -flags +cgop -g "${GOP}" -keyint_min "${GOP}" \
-    -force_key_frames "expr:gte(t,n_forced*${SEGMENT_SEC})" \
-    -b:v "${BITRATE}" -pix_fmt yuv420p \
-    -f segment -segment_time "${SEGMENT_SEC}" \
-    -segment_format mp4 -reset_timestamps 1 -strftime 1 \
-    -segment_format_options "movflags=${FRAG_FLAGS}" \
-    "${REC_DIR}/rec_%Y%m%d_%H%M%S.mp4"
+WORK="$(mktemp -d)"
+FIFO="${WORK}/h264"
+mkfifo "${FIFO}"
+
+FF=(ffmpeg -hide_banner -loglevel warning -nostdin)
+
+if [ "${ENCODER}" = hardware ]; then
+  FF+=(-fflags +genpts -r "${FPS}" -f h264 -i "${FIFO}" -c copy)
 else
-  OUT="${REC_DIR}/rec_$(date +%Y%m%d_%H%M%S).mp4"
-  exec ffmpeg -hide_banner -loglevel warning -nostdin \
-    -thread_queue_size 512 \
-    -f v4l2 -input_format "${INPUT_FORMAT}" \
-    -video_size "${WIDTH}x${HEIGHT}" -framerate "${FPS}" \
-    -i "${VIDEO_DEV}" \
-    -c:v libx264 -preset ultrafast \
-    -b:v "${BITRATE}" -pix_fmt yuv420p \
-    -movflags "${FRAG_FLAGS}" \
-    -f mp4 "${OUT}"
+  FF+=(-f rawvideo -pix_fmt yuv420p -s "${WIDTH}x${HEIGHT}" -r "${FPS}" -i "${FIFO}"
+    -c:v libx264 -preset ultrafast -b:v "${BITRATE}" -pix_fmt yuv420p)
+  if [ "${SEGMENT_SEC}" -gt 0 ]; then
+    FF+=(-flags +cgop -g "${INTRA}" -keyint_min "${INTRA}"
+      -force_key_frames "expr:gte(t,n_forced*${SEGMENT_SEC})")
+  fi
 fi
+
+if [ "${SEGMENT_SEC}" -gt 0 ]; then
+  FF+=(-f segment -segment_time "${SEGMENT_SEC}" -segment_format mp4
+    -segment_format_options "movflags=${FRAG_FLAGS}"
+    -reset_timestamps 1 -strftime 1 "${REC_DIR}/rec_%Y%m%d_%H%M%S.mp4")
+else
+  FF+=(-movflags "${FRAG_FLAGS}" -f mp4
+    "${REC_DIR}/rec_$(date +%Y%m%d_%H%M%S).mp4")
+fi
+
+rotate_loop &
+ROT_PID=$!
+
+echo "recorder started: ${WIDTH}x${HEIGHT}@${FPS}, encoder=${ENCODER}, af=${AUTOFOCUS_MODE}/${LENS_POSITION}, segment=${SEGMENT_SEC}s, dir=${REC_DIR}"
+
+"${FF[@]}" &
+FF_PID=$!
+"${CAM[@]}" >"${FIFO}" &
+CAM_PID=$!
+
+# Камеру валимо першою: ffmpeg бачить EOF і коректно закриває mp4.
+shutdown() {
+  kill "${CAM_PID}" 2>/dev/null || true
+  wait "${FF_PID}" 2>/dev/null || true
+  kill "${ROT_PID}" 2>/dev/null || true
+  rm -rf "${WORK}"
+  exit 0
+}
+trap shutdown TERM INT
+
+# Якщо камера впала — ffmpeg бачить EOF і виходить, сюди ж і приходимо.
+wait "${FF_PID}" || true
+shutdown
