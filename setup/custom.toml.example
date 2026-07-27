@@ -1,0 +1,43 @@
+# Fallback headless config для Raspberry Pi OS Bookworm+.
+#
+# Використовувати ТІЛЬКИ якщо RPi Imager OS Customisation не спрацював.
+# Скопіювати цей файл на boot-розділ SD-карти (FAT32, label=bootfs) під іменем:
+#   custom.toml
+# на першому буті скрипт rpi-firstboot прочитає його, налаштує систему
+# і файл самовидалиться.
+#
+# Docs: https://www.raspberrypi.com/documentation/computers/configuration.html#customisation
+
+config_version = 1
+
+[system]
+hostname = "rpi5-cam"
+
+[user]
+name = "pi"
+# TODO: згенерувати хеш пароля:
+#   openssl passwd -6
+# і вставити сюди. Пароль потрібен як fallback — основний вхід по SSH-ключу.
+password_encrypted = "REPLACE_WITH_OPENSSL_HASH"
+
+[ssh]
+enabled = true
+password_authentication = false
+# TODO: вставити вміст ~/.ssh/id_ed25519.pub (одним рядком у лапках)
+authorized_keys = [
+  "ssh-ed25519 AAAA...REPLACE_ME... user@host",
+]
+
+[wlan]
+# TODO: SSID твоєї Wi-Fi мережі
+ssid = "REPLACE_WITH_SSID"
+# TODO: пароль Wi-Fi. Можна лишити plain — first-boot скрипт зашифрує в NM.
+password = "REPLACE_WITH_PASSWORD"
+password_encrypted = false
+hidden = false
+# UA обов'язково — без country code Wi-Fi soft-blocked через rfkill.
+country = "UA"
+
+[locale]
+keymap = "us"
+timezone = "Europe/Kyiv"
