@@ -18,8 +18,18 @@
   }
   button:disabled { opacity: .35; cursor: not-allowed; }
   #conn { background: #2980b9; }
+  #disc { background: #7f8c8d; padding: 12px; font-size: 14px; }
+  #snap { background: #16a085; padding: 14px; font-size: 16px; }
   #rec  { background: #c0392b; }
   #stop { background: #555; }
+  select#preset {
+    padding: 12px; font-size: 15px; border-radius: 10px;
+    border: 1px solid #bbb; background: #fff; color: #222;
+  }
+  label.field { font-size: 12px; color: #666; margin-top: -8px; }
+  #snapWrap { margin: 0; }
+  #snapImg { width: 100%; border-radius: 10px; display: block; background: #eee; }
+  #snapTs { font-size: 12px; color: #666; text-align: center; margin-top: 6px; }
   #status {
     display: flex; align-items: center; gap: 10px;
     padding: 12px; border-radius: 10px; background: #f2f2f2;
@@ -58,6 +68,21 @@
   </div>
 
   <button id="conn">Підключити</button>
+  <button id="disc" hidden>Відключити</button>
+
+  <label class="field" for="preset">Формат</label>
+  <select id="preset">
+    <option value="0">1080p @ 30 fps · HW · дефолт</option>
+    <option value="1">720p @ 30 fps · HW · легкий</option>
+    <option value="2">1296p @ 30 fps · SW · треба охолодження</option>
+  </select>
+
+  <button id="snap" disabled>📸 Знімок для перевірки кадрування</button>
+  <figure id="snapWrap" hidden>
+    <img id="snapImg" alt="snapshot">
+    <figcaption id="snapTs"></figcaption>
+  </figure>
+
   <button id="rec"  disabled>● Запис</button>
   <button id="stop" disabled>■ Стоп</button>
 
@@ -74,6 +99,8 @@
     <input id="chr" value="12345678-1234-5678-1234-56789abcdef1">
     <label>Status characteristic UUID</label>
     <input id="chrStatus" value="12345678-1234-5678-1234-56789abcdef2">
+    <label>Snapshot characteristic UUID</label>
+    <input id="chrSnap" value="12345678-1234-5678-1234-56789abcdef3">
     <button id="saveCfg" style="background:#27ae60;padding:10px;font-size:13px">
       Зберегти
     </button>
@@ -93,7 +120,10 @@ const DEFAULTS = {
   svc:  "12345678-1234-5678-1234-56789abcdef0",
   chr:  "12345678-1234-5678-1234-56789abcdef1",
   chrStatus: "12345678-1234-5678-1234-56789abcdef2",
+  chrSnap:   "12345678-1234-5678-1234-56789abcdef3",
 };
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const $ = id => document.getElementById(id);
 const log = m => { $("log").textContent = m; console.log(m); };
@@ -124,10 +154,34 @@ if (!("bluetooth" in navigator)) {
 
 let chrCmd = null;
 let chrStatus = null;
+let chrSnap = null;
 let device = null;
+
+function setConnectedUI(on) {
+  $("conn").hidden = on;
+  $("disc").hidden = !on;
+  $("rec").disabled = !on;
+  $("stop").disabled = !on;
+  $("snap").disabled = !on || !chrSnap;
+}
+
+function resetConnectionState() {
+  chrCmd = null;
+  chrStatus = null;
+  chrSnap = null;
+  device = null;
+  setConnectedUI(false);
+  $("dot").classList.remove("on");
+}
 
 async function connect() {
   try {
+    // Якщо є стара сесія — валимо її ДО requestDevice, інакше Pi думає
+    // що ми все ще підключені й наступний коннект висне.
+    if (device?.gatt?.connected) {
+      try { device.gatt.disconnect(); } catch (_) {}
+    }
+
     const cfg = loadCfg();
     const svc  = cfg.svc.toLowerCase();
     const cuid = cfg.chr.toLowerCase();
@@ -141,15 +195,16 @@ async function connect() {
 
     device.addEventListener("gattserverdisconnected", () => {
       setLabel("зв'язок втрачено");
-      $("dot").classList.remove("on");
-      $("rec").disabled = true;
-      $("stop").disabled = true;
+      resetConnectionState();
     });
 
     const gatt = await device.gatt.connect();
     const service = await gatt.getPrimaryService(svc);
     chrCmd = await service.getCharacteristic(cuid);
     try { chrStatus = await service.getCharacteristic(suid); } catch (_) {}
+    try {
+      chrSnap = await service.getCharacteristic(cfg.chrSnap.toLowerCase());
+    } catch (_) { chrSnap = null; }
 
     if (chrStatus) {
       const v = await chrStatus.readValue();
@@ -158,25 +213,123 @@ async function connect() {
       setLabel("підключено");
     }
 
-    $("rec").disabled = false;
-    $("stop").disabled = false;
+    setConnectedUI(true);
     log("підключено до " + device.name);
   } catch (e) {
     log("помилка: " + e.message);
     setLabel("помилка підключення");
+    resetConnectionState();
   }
 }
 
-async function send(byte) {
-  if (!chrCmd) return;
-  await chrCmd.writeValue(Uint8Array.of(byte));
+function disconnect() {
+  if (device?.gatt?.connected) {
+    try { device.gatt.disconnect(); } catch (_) {}
+  }
+  resetConnectionState();
+  setLabel("відключено");
+  log("відключено вручну");
 }
 
+async function sendStart(preset) {
+  if (!chrCmd) return;
+  await chrCmd.writeValue(Uint8Array.of(0x01, preset & 0xff));
+}
+
+async function sendStop() {
+  if (!chrCmd) return;
+  await chrCmd.writeValue(Uint8Array.of(0x00));
+}
+
+async function snapshot() {
+  if (!chrCmd || !chrSnap) return;
+  $("snap").disabled = true;
+  const prevLabel = $("label").textContent;
+  setLabel("знімок...");
+  try {
+    await chrCmd.writeValue(Uint8Array.of(0x02));
+    const chunks = [];
+    let total = null;
+    const started = Date.now();
+    while (Date.now() - started < 20000) {
+      const v = await chrSnap.readValue();
+      const buf = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+      if (buf.length < 4) { await sleep(150); continue; }
+      const seq = buf[0] | (buf[1] << 8);
+      const chunkTotal = buf[2] | (buf[3] << 8);
+      // total=0 = ще не готовий, чекаємо
+      if (chunkTotal === 0) { await sleep(150); continue; }
+      if (total === null) {
+        if (seq !== 0) { log("skew: seq=" + seq); break; }
+        total = chunkTotal;
+      }
+      chunks.push(buf.slice(4));
+      if (seq === total - 1) break;
+    }
+    if (total === null || chunks.length !== total) {
+      log("знімок timeout або битий (" + chunks.length + "/" + total + ")");
+      return;
+    }
+    const combined = concatChunks(chunks);
+    const dv = new DataView(combined.buffer, combined.byteOffset, combined.byteLength);
+    const tsMs = Number(dv.getBigUint64(0, true));
+    const jpeg = combined.slice(8);
+    const oldSrc = $("snapImg").src;
+    if (oldSrc && oldSrc.startsWith("blob:")) URL.revokeObjectURL(oldSrc);
+    const url = URL.createObjectURL(new Blob([jpeg], { type: "image/jpeg" }));
+    $("snapImg").src = url;
+    $("snapWrap").hidden = false;
+    $("snapTs").textContent =
+      new Date(tsMs).toLocaleString("uk-UA") +
+      " · " + jpeg.length.toLocaleString("uk-UA") + " байт";
+    log(`знімок ${jpeg.length} байт, ${total} чанків`);
+  } catch (e) {
+    log("помилка знімка: " + e.message);
+  } finally {
+    setLabel(prevLabel);
+    $("snap").disabled = $("dot").classList.contains("on") || !chrSnap;
+  }
+}
+
+function concatChunks(chunks) {
+  const size = chunks.reduce((s, c) => s + c.length, 0);
+  const out = new Uint8Array(size);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+// Pi думає що ми ще підключені поки не отримає GATT-disconnect. Без цього
+// закриття вкладки лишає mostro-connection, і наступного разу потрібно чистити
+// site data. Робимо явний disconnect при закритті.
+window.addEventListener("pagehide", () => {
+  if (device?.gatt?.connected) {
+    try { device.gatt.disconnect(); } catch (_) {}
+  }
+});
+
 loadCfg();
+const savedPreset = localStorage.getItem("preset");
+if (savedPreset !== null) $("preset").value = savedPreset;
+$("preset").addEventListener("change", () =>
+  localStorage.setItem("preset", $("preset").value));
+
 $("saveCfg").onclick = saveCfg;
 $("conn").onclick = connect;
-$("rec").onclick  = async () => { await send(0x01); setRecUI(true); };
-$("stop").onclick = async () => { await send(0x00); setRecUI(false); };
+$("disc").onclick = disconnect;
+$("snap").onclick = snapshot;
+$("rec").onclick  = async () => {
+  const preset = parseInt($("preset").value, 10) || 0;
+  await sendStart(preset);
+  setRecUI(true);
+  // Під час запису rpicam-jpeg не працює — камера зайнята.
+  $("snap").disabled = true;
+};
+$("stop").onclick = async () => {
+  await sendStop();
+  setRecUI(false);
+  $("snap").disabled = !chrSnap;
+};
 </script>
 </body>
 </html>
