@@ -22,6 +22,7 @@
   #snap { background: #16a085; padding: 14px; font-size: 16px; }
   #rec  { background: #c0392b; }
   #stop { background: #555; }
+  #reset { background: #d35400; padding: 10px; font-size: 13px; }
   select#preset {
     padding: 12px; font-size: 15px; border-radius: 10px;
     border: 1px solid #bbb; background: #fff; color: #222;
@@ -105,6 +106,8 @@
       Зберегти
     </button>
   </details>
+
+  <button id="reset">🔄 Скинути зʼєднання (якщо не підключається)</button>
 
   <div class="debug">
     Не бачить пристрій?
@@ -318,10 +321,34 @@ if (savedPreset !== null) $("preset").value = savedPreset;
 $("preset").addEventListener("change", () =>
   localStorage.setItem("preset", $("preset").value));
 
+// Скидання для юзерів, які не вміють чистити кеш браузера / забувати пристрій
+// у BT-налаштуваннях телефона. Робить максимум що дозволяє Web Bluetooth API:
+// 1) розриває GATT-сесію (щоб Pi не думав, що ми ще підключені),
+// 2) через device.forget() (Chrome 114+) прибирає пристрій зі списку дозволених
+//    для цього origin — Chrome при наступному коннекті знову покаже picker,
+// 3) hard-reload сторінки з обходом кешу.
+// Кеш ОС/Bluetooth-стеку (GATT services cache) з JS почистити неможливо —
+// це вирішує тільки «забути пристрій» у системних налаштуваннях BT.
+async function fullReset() {
+  $("reset").disabled = true;
+  try {
+    if (device?.gatt?.connected) {
+      try { device.gatt.disconnect(); } catch (_) {}
+    }
+    if (device && typeof device.forget === "function") {
+      try { await device.forget(); log("пристрій забуто у браузері"); } catch (_) {}
+    }
+  } finally {
+    // невелика пауза щоб disconnect дійшов до Pi
+    setTimeout(() => location.reload(), 300);
+  }
+}
+
 $("saveCfg").onclick = saveCfg;
 $("conn").onclick = connect;
 $("disc").onclick = disconnect;
 $("snap").onclick = snapshot;
+$("reset").onclick = fullReset;
 $("rec").onclick  = async () => {
   const preset = parseInt($("preset").value, 10) || 0;
   await sendStart(preset);
