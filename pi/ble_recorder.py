@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import pathlib
@@ -56,10 +57,48 @@ log = logging.getLogger("ble_recorder")
 
 os.makedirs(REC_DIR, exist_ok=True)
 
+# Персистентний стан для відновлення після падіння / зникнення живлення.
+# Пишемо на диск при старті запису, стираємо при чистому стопі. Якщо сервіс
+# бачить файл при завантаженні — вважає що запис ішов і піднімає його знову.
+STATE_FILE = os.path.join(REC_DIR, ".recording_state")
+
 # Сенсори з моторним автофокусом. Для решти передавати --autofocus-mode /
 # --lens-position не можна — rpicam-vid або вилетить, або тихо не почне писати
 # кадри (=> 0-байтний mp4 на виході).
 AF_CAPABLE_SENSORS = {"imx708"}
+
+
+def _persist_state(active, preset_id=None):
+    if active:
+        # Atomic write: temp + rename. Захист від torn write при power loss
+        # посеред flush'а.
+        tmp = STATE_FILE + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump({"active": True, "preset_id": preset_id}, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, STATE_FILE)
+        except OSError as e:
+            log.warning("could not persist state: %s", e)
+    else:
+        try:
+            os.remove(STATE_FILE)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log.warning("could not clear state: %s", e)
+
+
+def _load_state():
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("could not load state: %s", e)
+        return None
 
 
 def _detect_camera():
@@ -260,6 +299,7 @@ def start_recording(preset_id=None):
         rot_t = threading.Thread(target=_rotator_loop, args=(stop_event,), daemon=True)
         rot_t.start()
         state.update(recording=True, cam=cam, ff=ff, stop_event=stop_event, rot_thread=rot_t)
+        _persist_state(True, preset_id)
         log.info("REC start preset=%s segments=%ds", preset_id, SEGMENT_SEC)
         return True
 
@@ -289,6 +329,7 @@ def stop_recording():
             ff.wait(timeout=5)
     with lock:
         state.update(recording=False, cam=None, ff=None, stop_event=None, rot_thread=None)
+    _persist_state(False)
     log.info("REC stop")
     return True
 
@@ -415,6 +456,16 @@ def main():
         flags=["read"],
         read_callback=read_snapshot,
     )
+
+    # Відновлення після падіння / power loss: якщо на момент старту сервіса
+    # лежить state-файл — вважаємо, що запис ішов і його треба продовжити.
+    resumed = _load_state()
+    if resumed and resumed.get("active"):
+        preset_id = resumed.get("preset_id")
+        log.info("resuming recording after boot preset=%s", preset_id)
+        if not start_recording(preset_id):
+            log.warning("resume failed, clearing state")
+            _persist_state(False)
 
     log.info("advertising as '%s'", DEVICE_NAME)
     p.publish()

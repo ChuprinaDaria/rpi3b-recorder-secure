@@ -34,7 +34,8 @@ Environment=SEGMENT_SEC=0
 ExecStart=/usr/bin/env bash ${APP_DIR}/autostart.sh
 KillSignal=SIGTERM
 TimeoutStopSec=15
-Restart=on-failure
+# always, не on-failure: тут запис має жити поки є живлення.
+Restart=always
 RestartSec=5
 
 [Install]

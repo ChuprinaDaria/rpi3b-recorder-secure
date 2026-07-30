@@ -52,7 +52,9 @@ ExecStart=/usr/bin/python3 ${APP_DIR}/ble_recorder.py
 # деталі в шапці ble_advertise.sh
 ExecStartPost=+/bin/bash -c 'sleep 3; DEVICE_NAME=RPi5-CAM ${APP_DIR}/ble_advertise.sh start'
 ExecStopPost=+${APP_DIR}/ble_advertise.sh stop
-Restart=on-failure
+# always, не on-failure: після нормального виходу теж піднімаємось. Разом з
+# .recording_state це гарантує, що ввімкнення живлення = продовження запису.
+Restart=always
 RestartSec=3
 
 [Install]
