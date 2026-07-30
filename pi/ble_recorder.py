@@ -1,6 +1,7 @@
 import logging
 import os
 import pathlib
+import re
 import shutil
 import signal
 import subprocess
@@ -55,6 +56,51 @@ log = logging.getLogger("ble_recorder")
 
 os.makedirs(REC_DIR, exist_ok=True)
 
+# Сенсори з моторним автофокусом. Для решти передавати --autofocus-mode /
+# --lens-position не можна — rpicam-vid або вилетить, або тихо не почне писати
+# кадри (=> 0-байтний mp4 на виході).
+AF_CAPABLE_SENSORS = {"imx708"}
+
+
+def _detect_camera():
+    """Читає перший рядок з `rpicam-vid --list-cameras`.
+
+    Формат: '0 : imx708 [4608x2592 10-bit RGGB] (/base/...)'
+    Повертає dict або None, якщо нічого не знайшли.
+    """
+    try:
+        r = subprocess.run(
+            ["rpicam-vid", "--list-cameras"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        log.warning("camera list failed: %s", e)
+        return None
+    text = (r.stdout or "") + (r.stderr or "")
+    m = re.search(r"^\s*(\d+)\s*:\s*(\S+)\s*\[(\d+)x(\d+)", text, re.M)
+    if not m:
+        log.warning("could not parse --list-cameras output:\n%s", text)
+        return None
+    sensor = m.group(2).lower()
+    return {
+        "index": int(m.group(1)),
+        "sensor": sensor,
+        "max_width": int(m.group(3)),
+        "max_height": int(m.group(4)),
+        "has_autofocus": sensor in AF_CAPABLE_SENSORS,
+    }
+
+
+CAMERA = _detect_camera()
+if CAMERA:
+    log.info(
+        "camera: %s max=%dx%d autofocus=%s",
+        CAMERA["sensor"], CAMERA["max_width"], CAMERA["max_height"],
+        CAMERA["has_autofocus"],
+    )
+else:
+    log.warning("no CSI camera detected — рекордер стартує, але запис впаде")
+
 state = {"recording": False, "cam": None, "ff": None, "stop_event": None, "rot_thread": None}
 lock = threading.Lock()
 
@@ -102,17 +148,21 @@ def _resolve_preset(preset_id):
 
 
 def _start_pipeline(width, height, fps, bitrate, encoder_hint):
-    """rpicam-vid → ffmpeg → mp4."""
+    """rpicam-vid → ffmpeg → mp4. Повертає (cam, ff, out_path) або (None, None, None)."""
     # Сегмент ріжеться тільки по keyframe, тому GOP = довжині сегмента.
     intra = fps * SEGMENT_SEC if SEGMENT_SEC > 0 else fps
     cam_cmd = [
         "rpicam-vid", "-t", "0", "-n",
         "--width", str(width), "--height", str(height),
         "--framerate", str(fps),
-        "--autofocus-mode", AUTOFOCUS_MODE,
     ]
-    if AUTOFOCUS_MODE == "manual":
-        cam_cmd += ["--lens-position", LENS_POSITION]
+    # AF-контроли валідні лише для сенсорів з моторним фокусом (Camera Module 3).
+    # На IMX219/IMX477/тощо rpicam-vid зʼїсть їх мовчки або впаде — і в другому
+    # випадку ffmpeg лишає 0-байтний mp4.
+    if CAMERA is None or CAMERA["has_autofocus"]:
+        cam_cmd += ["--autofocus-mode", AUTOFOCUS_MODE]
+        if AUTOFOCUS_MODE == "manual":
+            cam_cmd += ["--lens-position", LENS_POSITION]
 
     ff_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin"]
     hardware = _use_hw_encoder(encoder_hint)
@@ -143,6 +193,7 @@ def _start_pipeline(width, height, fps, bitrate, encoder_hint):
             ]
     cam_cmd += ["-o", "-"]
 
+    out_path = None
     if SEGMENT_SEC > 0:
         ff_cmd += [
             "-f", "segment", "-segment_time", str(SEGMENT_SEC),
@@ -152,19 +203,42 @@ def _start_pipeline(width, height, fps, bitrate, encoder_hint):
             os.path.join(REC_DIR, "rec_%Y%m%d_%H%M%S.mp4"),
         ]
     else:
-        ff_cmd += [
-            "-movflags", FRAG_FLAGS, "-f", "mp4",
-            os.path.join(REC_DIR, time.strftime("rec_%Y%m%d_%H%M%S.mp4")),
-        ]
+        out_path = os.path.join(REC_DIR, time.strftime("rec_%Y%m%d_%H%M%S.mp4"))
+        ff_cmd += ["-movflags", FRAG_FLAGS, "-f", "mp4", out_path]
 
     cam = subprocess.Popen(cam_cmd, stdout=subprocess.PIPE)
     ff = subprocess.Popen(ff_cmd, stdin=cam.stdout)
     cam.stdout.close()
+
+    # Якщо rpicam-vid здох на старті (несумісні флаги, відсутній сенсор) —
+    # ffmpeg отримає EOF і закриє файл 0-байтовим. Ловимо це тут.
+    time.sleep(0.5)
+    if cam.poll() is not None:
+        log.error("rpicam-vid exited at start with code %d", cam.returncode)
+        try:
+            ff.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            ff.terminate()
+            try:
+                ff.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                ff.kill()
+        if out_path and os.path.exists(out_path):
+            try:
+                if os.path.getsize(out_path) == 0:
+                    os.remove(out_path)
+                    log.info("removed empty %s", os.path.basename(out_path))
+            except OSError:
+                pass
+        return None, None, None
+
     log.info(
-        "pipeline start %dx%d@%d encoder=%s af=%s",
-        width, height, fps, "hardware" if hardware else "software", AUTOFOCUS_MODE,
+        "pipeline start %dx%d@%d encoder=%s af=%s sensor=%s",
+        width, height, fps, "hardware" if hardware else "software",
+        AUTOFOCUS_MODE if (CAMERA is None or CAMERA["has_autofocus"]) else "n/a",
+        CAMERA["sensor"] if CAMERA else "unknown",
     )
-    return cam, ff
+    return cam, ff, out_path
 
 
 def _rotator_loop(stop_event):
@@ -178,7 +252,10 @@ def start_recording(preset_id=None):
             return False
         w, h, fps, br, enc = _resolve_preset(preset_id)
         rotate_old_files()
-        cam, ff = _start_pipeline(w, h, fps, br, enc)
+        cam, ff, out_path = _start_pipeline(w, h, fps, br, enc)
+        if cam is None:
+            log.warning("REC start failed preset=%s", preset_id)
+            return False
         stop_event = threading.Event()
         rot_t = threading.Thread(target=_rotator_loop, args=(stop_event,), daemon=True)
         rot_t.start()
@@ -221,10 +298,11 @@ def _capture_snapshot():
         "rpicam-jpeg", "-n", "-t", "500",
         "--width", str(SNAPSHOT_WIDTH), "--height", str(SNAPSHOT_HEIGHT),
         "--quality", str(SNAPSHOT_QUALITY),
-        "--autofocus-mode", AUTOFOCUS_MODE,
     ]
-    if AUTOFOCUS_MODE == "manual":
-        cmd += ["--lens-position", LENS_POSITION]
+    if CAMERA is None or CAMERA["has_autofocus"]:
+        cmd += ["--autofocus-mode", AUTOFOCUS_MODE]
+        if AUTOFOCUS_MODE == "manual":
+            cmd += ["--lens-position", LENS_POSITION]
     cmd += ["-o", SNAPSHOT_PATH]
     subprocess.run(cmd, check=True, timeout=10, stderr=subprocess.PIPE)
 

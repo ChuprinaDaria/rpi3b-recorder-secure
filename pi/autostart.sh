@@ -36,13 +36,28 @@ else
   INTRA="${FPS}"
 fi
 
-CAM=(rpicam-vid -t 0 -n
-  --width "${WIDTH}" --height "${HEIGHT}" --framerate "${FPS}"
-  --autofocus-mode "${AUTOFOCUS_MODE}")
+# Autofocus-контроли валідні лише для сенсорів з моторним фокусом (imx708).
+# На IMX219/IMX477/тощо rpicam-vid або впаде, або тихо не почне писати кадри
+# і ffmpeg лишить 0-байтний mp4. Тому детектимо сенсор і кладемо AF-флаги
+# тільки коли їх реально можна юзати. Оверрайд: HAS_AUTOFOCUS=1 або =0.
+if [ -z "${HAS_AUTOFOCUS:-}" ]; then
+  SENSOR="$(rpicam-vid --list-cameras 2>&1 | grep -oE '^[[:space:]]*[0-9]+[[:space:]]*:[[:space:]]*[^[:space:]]+' | head -n1 | awk '{print $NF}')"
+  case "${SENSOR}" in
+    imx708) HAS_AUTOFOCUS=1 ;;
+    *)      HAS_AUTOFOCUS=0 ;;
+  esac
+  echo "detected sensor='${SENSOR:-unknown}' autofocus=${HAS_AUTOFOCUS}"
+fi
 
-# lens-position має сенс лише в manual: 0 = безкінечність.
-if [ "${AUTOFOCUS_MODE}" = "manual" ]; then
-  CAM+=(--lens-position "${LENS_POSITION}")
+CAM=(rpicam-vid -t 0 -n
+  --width "${WIDTH}" --height "${HEIGHT}" --framerate "${FPS}")
+
+if [ "${HAS_AUTOFOCUS}" = "1" ]; then
+  CAM+=(--autofocus-mode "${AUTOFOCUS_MODE}")
+  # lens-position має сенс лише в manual: 0 = безкінечність.
+  if [ "${AUTOFOCUS_MODE}" = "manual" ]; then
+    CAM+=(--lens-position "${LENS_POSITION}")
+  fi
 fi
 
 # Pi 4 має апаратний H.264 (bcm2835-codec), Pi 5 — ні, там кодує CPU.
@@ -107,14 +122,23 @@ FF_PID=$!
 CAM_PID=$!
 
 # Камеру валимо першою: ffmpeg бачить EOF і коректно закриває mp4.
+# На старті чистимо 0-байтні mp4 (rpicam-vid впав → ffmpeg відкрив і закрив пустим).
 shutdown() {
   kill "${CAM_PID}" 2>/dev/null || true
   wait "${FF_PID}" 2>/dev/null || true
   kill "${ROT_PID}" 2>/dev/null || true
+  find "${REC_DIR}" -maxdepth 1 -type f -name 'rec_*.mp4' -size 0c -delete 2>/dev/null || true
   rm -rf "${WORK}"
   exit 0
 }
 trap shutdown TERM INT
+
+# Sanity check: якщо rpicam-vid здох за пів секунди — далі теж 0-байтний файл буде.
+sleep 0.5
+if ! kill -0 "${CAM_PID}" 2>/dev/null; then
+  echo "rpicam-vid died at start — aborting" >&2
+  shutdown
+fi
 
 # Якщо камера впала — ffmpeg бачить EOF і виходить, сюди ж і приходимо.
 wait "${FF_PID}" || true

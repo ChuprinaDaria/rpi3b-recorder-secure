@@ -201,8 +201,20 @@ async function connect() {
       resetConnectionState();
     });
 
-    const gatt = await device.gatt.connect();
-    const service = await gatt.getPrimaryService(svc);
+    // BlueZ/адаптер інколи розриває GATT-сесію відразу після connect (адаптер
+    // не встиг доскинути ATT-таблицю). Один retry рятує в 90% випадків, а
+    // подальші вже не мають сенсу — краще користувачу натиснути ще раз.
+    let service;
+    try {
+      const gatt = await device.gatt.connect();
+      service = await gatt.getPrimaryService(svc);
+    } catch (e) {
+      if (!/disconnected/i.test(e.message)) throw e;
+      log("GATT drop, retry...");
+      await sleep(400);
+      const gatt = await device.gatt.connect();
+      service = await gatt.getPrimaryService(svc);
+    }
     chrCmd = await service.getCharacteristic(cuid);
     try { chrStatus = await service.getCharacteristic(suid); } catch (_) {}
     try {
