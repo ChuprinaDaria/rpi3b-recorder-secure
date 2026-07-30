@@ -204,7 +204,11 @@ async function connect() {
     try { chrStatus = await service.getCharacteristic(suid); } catch (_) {}
     try {
       chrSnap = await service.getCharacteristic(cfg.chrSnap.toLowerCase());
-    } catch (_) { chrSnap = null; }
+      log("snap: ok");
+    } catch (e) {
+      chrSnap = null;
+      log("snap: недоступний (" + e.message + ")");
+    }
 
     if (chrStatus) {
       const v = await chrStatus.readValue();
