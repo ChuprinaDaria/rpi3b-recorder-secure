@@ -11,6 +11,9 @@ LENS_POSITION="${LENS_POSITION:-0}"
 SEGMENT_SEC="${SEGMENT_SEC:-0}"
 MAX_FILES="${MAX_FILES:-50}"
 FREE_MB_MIN="${FREE_MB_MIN:-500}"
+# Як часто sync поки йде запис. Без цього ffmpeg-пакети сидять у page cache
+# і при power-cut ext4 з delayed alloc лишає файл 0 байт. 0 = вимкнути.
+SYNC_INTERVAL_SEC="${SYNC_INTERVAL_SEC:-3}"
 
 mkdir -p "${REC_DIR}"
 
@@ -26,6 +29,14 @@ rotate_loop() {
       echo "low space (<${FREE_MB_MIN}MB), forcing extra rotation"
       ls -1t "${REC_DIR}"/rec_*.mp4 2>/dev/null | tail -n 5 | xargs -r rm -f
     fi
+  done
+}
+
+# Періодичний sync — обмежує втрату відео при power-cut до SYNC_INTERVAL_SEC.
+sync_loop() {
+  while true; do
+    sleep "${SYNC_INTERVAL_SEC}"
+    sync
   done
 }
 
@@ -89,7 +100,7 @@ WORK="$(mktemp -d)"
 FIFO="${WORK}/h264"
 mkfifo "${FIFO}"
 
-FF=(ffmpeg -hide_banner -loglevel warning -nostdin)
+FF=(ffmpeg -hide_banner -loglevel warning -nostdin -flush_packets 1)
 
 if [ "${ENCODER}" = hardware ]; then
   FF+=(-fflags +genpts -r "${FPS}" -f h264 -i "${FIFO}" -c copy)
@@ -111,8 +122,19 @@ else
     "${REC_DIR}/rec_$(date +%Y%m%d_%H%M%S).mp4")
 fi
 
+# Прибрати 0-байтні mp4, що лишились від попереднього power-cut (ffmpeg відкрив
+# файл, але жоден фрагмент не долетів до диска через ext4 delayed alloc).
+find "${REC_DIR}" -maxdepth 1 -type f -name 'rec_*.mp4' -size 0c -delete 2>/dev/null || true
+
 rotate_loop &
 ROT_PID=$!
+
+if [ "${SYNC_INTERVAL_SEC}" -gt 0 ]; then
+  sync_loop &
+  SYNC_PID=$!
+else
+  SYNC_PID=
+fi
 
 echo "recorder started: ${WIDTH}x${HEIGHT}@${FPS}, encoder=${ENCODER}, af=${AUTOFOCUS_MODE}/${LENS_POSITION}, segment=${SEGMENT_SEC}s, dir=${REC_DIR}"
 
@@ -127,6 +149,9 @@ shutdown() {
   kill "${CAM_PID}" 2>/dev/null || true
   wait "${FF_PID}" 2>/dev/null || true
   kill "${ROT_PID}" 2>/dev/null || true
+  [ -n "${SYNC_PID}" ] && kill "${SYNC_PID}" 2>/dev/null || true
+  # Фінальний sync — щоб moov, дописаний ffmpeg після EOF, точно ліг на диск.
+  sync
   find "${REC_DIR}" -maxdepth 1 -type f -name 'rec_*.mp4' -size 0c -delete 2>/dev/null || true
   rm -rf "${WORK}"
   exit 0

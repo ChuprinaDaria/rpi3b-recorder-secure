@@ -24,6 +24,10 @@ LENS_POSITION = os.environ.get("LENS_POSITION", "0")
 # Довжина одного mp4-чанку в секундах. 0 = не різати, писати одним файлом.
 SEGMENT_SEC = int(os.environ.get("SEGMENT_SEC", 0))
 MAX_FILES = int(os.environ.get("MAX_FILES", 50))
+# Як часто робимо sync() поки йде запис. Обмежує втрату при power-cut:
+# без цього ffmpeg-пакети сидять у page cache і при відвалі живлення ext4
+# з delayed alloc лишає файл нульового розміру. 0 = вимкнути.
+SYNC_INTERVAL_SEC = int(os.environ.get("SYNC_INTERVAL_SEC", 3))
 
 # Пресети, які веб-UI обирає другим байтом start-команди.
 # Порядок мусить збігатися з <select> у index.html.
@@ -140,13 +144,35 @@ if CAMERA:
 else:
     log.warning("no CSI camera detected — рекордер стартує, але запис впаде")
 
-state = {"recording": False, "cam": None, "ff": None, "stop_event": None, "rot_thread": None}
+state = {"recording": False, "cam": None, "ff": None, "stop_event": None,
+         "rot_thread": None, "sync_thread": None}
 lock = threading.Lock()
 
 snapshot_state = {"chunks": [], "idx": 0, "lock": threading.Lock()}
 
 
+def _prune_empty():
+    """Прибирає 0-байтні mp4. Такі лишаються, коли ffmpeg відкрив файл, але
+    жоден фрагмент не долетів до диска до power-cut (ext4 delayed alloc)."""
+    try:
+        names = os.listdir(REC_DIR)
+    except OSError as e:
+        log.warning("prune scan failed: %s", e)
+        return
+    for name in names:
+        if not name.endswith(".mp4"):
+            continue
+        p = os.path.join(REC_DIR, name)
+        try:
+            if os.path.getsize(p) == 0:
+                os.remove(p)
+                log.info("pruned empty %s", name)
+        except OSError:
+            pass
+
+
 def rotate_old_files():
+    _prune_empty()
     files = sorted(
         (f for f in os.listdir(REC_DIR) if f.endswith(".mp4")),
         reverse=True,
@@ -203,7 +229,11 @@ def _start_pipeline(width, height, fps, bitrate, encoder_hint):
         if AUTOFOCUS_MODE == "manual":
             cam_cmd += ["--lens-position", LENS_POSITION]
 
-    ff_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin"]
+    # -flush_packets 1: не тримати пакети в user-space буфері ffmpeg. Без цього
+    # sync-loop нижче flushit'ь пусті сторінки — фрагменти mp4 не встигають
+    # потрапити в kernel до power-cut.
+    ff_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
+              "-flush_packets", "1"]
     hardware = _use_hw_encoder(encoder_hint)
     if hardware:
         cam_cmd += [
@@ -285,6 +315,16 @@ def _rotator_loop(stop_event):
         rotate_old_files()
 
 
+def _sync_loop(stop_event):
+    # os.sync() глобальний, але цінніше — обмежити втрату при power-cut
+    # до SYNC_INTERVAL_SEC секунд відео.
+    while not stop_event.wait(SYNC_INTERVAL_SEC):
+        try:
+            os.sync()
+        except OSError as e:
+            log.warning("sync failed: %s", e)
+
+
 def start_recording(preset_id=None):
     with lock:
         if state["recording"]:
@@ -298,9 +338,15 @@ def start_recording(preset_id=None):
         stop_event = threading.Event()
         rot_t = threading.Thread(target=_rotator_loop, args=(stop_event,), daemon=True)
         rot_t.start()
-        state.update(recording=True, cam=cam, ff=ff, stop_event=stop_event, rot_thread=rot_t)
+        sync_t = None
+        if SYNC_INTERVAL_SEC > 0:
+            sync_t = threading.Thread(target=_sync_loop, args=(stop_event,), daemon=True)
+            sync_t.start()
+        state.update(recording=True, cam=cam, ff=ff, stop_event=stop_event,
+                     rot_thread=rot_t, sync_thread=sync_t)
         _persist_state(True, preset_id)
-        log.info("REC start preset=%s segments=%ds", preset_id, SEGMENT_SEC)
+        log.info("REC start preset=%s segments=%ds sync=%ds",
+                 preset_id, SEGMENT_SEC, SYNC_INTERVAL_SEC)
         return True
 
 
@@ -327,8 +373,16 @@ def stop_recording():
             log.warning("ffmpeg hung after EOF, killing")
             ff.kill()
             ff.wait(timeout=5)
+    # Один фінальний sync — щоб moov, дописаний ffmpeg після EOF, точно ліг
+    # на диск до того як ми зняли recording=False (і хтось міг сдьорнути
+    # живлення відразу після успішного стопа).
+    try:
+        os.sync()
+    except OSError as e:
+        log.warning("final sync failed: %s", e)
     with lock:
-        state.update(recording=False, cam=None, ff=None, stop_event=None, rot_thread=None)
+        state.update(recording=False, cam=None, ff=None, stop_event=None,
+                     rot_thread=None, sync_thread=None)
     _persist_state(False)
     log.info("REC stop")
     return True
