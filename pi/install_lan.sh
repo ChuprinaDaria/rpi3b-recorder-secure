@@ -14,9 +14,12 @@ LAN_CIDR="${LAN_CIDR:-192.168.1.0/24}"
 
 apt-get update
 apt-get install -y --no-install-recommends \
-  ffmpeg v4l-utils cryptsetup python3-flask nftables
+  ffmpeg v4l-utils cryptsetup python3-flask nftables inotify-tools
 
 usermod -aG video "${REC_USER}" || true
+# systemd-journal: щоб journalctl під ${REC_USER} бачив логи інших сервісів
+# (без цього — 'Hint: not seeing messages from other users').
+usermod -aG systemd-journal "${REC_USER}" || true
 
 # LUKS bootstrap (idempotent).
 "$(dirname "$0")/luks_setup.sh"
@@ -51,7 +54,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=${REC_USER}
-SupplementaryGroups=video
+SupplementaryGroups=video systemd-journal
 WorkingDirectory=${APP_DIR}
 Environment=HOME=${REC_HOME}
 Environment=OPSEC_DIR=${OPSEC_DIR}

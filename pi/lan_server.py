@@ -219,6 +219,58 @@ def _sync_loop(stop_event):
             pass
 
 
+def _fs_watcher_loop(stop_event):
+    """inotify-моніторинг директорії під LUKS.
+
+    Все, що відбувається у MNT (create/close_write/delete/move), логуємо
+    через log.info("fs: ..."). Ці рядки потрапляють у той самий systemd-journal
+    -> той самий SSE-стрім, який дивиться веб-UI. Тобто ти бачиш "жив" LUKS:
+    коли ffmpeg відкриває mp4, коли фрагменти fsync-нуться, коли ротація
+    видаляє старі файли, коли wipe відмонтовує.
+
+    Watcher автоматично реcтартиться після umount (наприклад, під час wipe):
+    вихід inotifywait -> пауза 2с -> перевірка mount -> знову inotify.
+    """
+    while not stop_event.is_set():
+        if not os.path.ismount(MNT):
+            log.info("fs: MNT %s не змонтований — watcher waits", MNT)
+            for _ in range(20):
+                if stop_event.is_set() or os.path.ismount(MNT):
+                    break
+                time.sleep(0.5)
+            continue
+        cmd = [
+            "inotifywait", "-m", "-r", "--quiet",
+            "--format", "%T %e %w%f",
+            "--timefmt", "%H:%M:%S",
+            "-e", "create,close_write,delete,moved_to,moved_from,unmount",
+            MNT,
+        ]
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT)
+        except (FileNotFoundError, OSError) as e:
+            log.warning("fs: inotifywait failed: %s (пропускаю fs-watch)", e)
+            return
+        log.info("fs: watching %s", MNT)
+        try:
+            for raw in iter(proc.stdout.readline, b""):
+                if stop_event.is_set():
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if not line:
+                    continue
+                log.info("fs: %s", line)
+        finally:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                proc.kill()
+        # unmount або процес помер -> повертаємось у зовнішній while
+        time.sleep(1)
+
+
 def start_recording(preset_id=None):
     with lock:
         if state["recording"]:
@@ -413,8 +465,17 @@ def main():
             log.warning("missing tool: %s", tool)
     log.info("listening on %s:%d (STATIC=%s SERVICE=%s)",
              LISTEN_HOST, LISTEN_PORT, STATIC_DIR, SERVICE_NAME)
+
+    # fs-watcher: логуємо inotify-події з /mnt/rec у той же журнал.
+    fs_stop = threading.Event()
+    fs_t = threading.Thread(target=_fs_watcher_loop, args=(fs_stop,), daemon=True)
+    fs_t.start()
+
     # threaded=True — щоб SSE не блокував інші запити
-    app.run(host=LISTEN_HOST, port=LISTEN_PORT, threaded=True, debug=False)
+    try:
+        app.run(host=LISTEN_HOST, port=LISTEN_PORT, threaded=True, debug=False)
+    finally:
+        fs_stop.set()
 
 
 if __name__ == "__main__":
