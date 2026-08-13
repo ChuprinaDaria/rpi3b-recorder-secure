@@ -3,68 +3,98 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>RPi3B secure REC (LAN)</title>
+<title>Pi 3B secure REC · LAN</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: light dark; --bg:#fff; --fg:#222; --muted:#666; }
+  * { box-sizing: border-box; }
   body {
     font-family: system-ui, sans-serif;
-    max-width: 480px; margin: 0 auto; padding: 20px;
-    display: flex; flex-direction: column; gap: 12px;
+    max-width: 720px; margin: 0 auto; padding: 20px;
+    display: flex; flex-direction: column; gap: 14px;
+    color: var(--fg); background: var(--bg);
   }
-  h1 { font-size: 18px; margin: 0 0 4px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 14px; margin: 0 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
   button {
-    padding: 18px; font-size: 17px; border: none; border-radius: 12px;
+    padding: 14px; font-size: 15px; border: none; border-radius: 10px;
     color: #fff; cursor: pointer;
   }
   button:disabled { opacity: .35; cursor: not-allowed; }
-  #snap { background: #16a085; padding: 12px; font-size: 15px; }
+  #snap { background: #16a085; }
   #rec  { background: #c0392b; }
   #stop { background: #555; }
-  #wipe { background: #8e0000; padding: 14px; font-size: 14px; border: 2px solid #4a0000; }
+  #wipe { background: #8e0000; padding: 12px; font-size: 14px; border: 2px solid #4a0000; }
   select#preset {
     padding: 10px; font-size: 14px; border-radius: 8px;
     border: 1px solid #bbb; background: #fff; color: #222;
   }
-  label.field { font-size: 12px; color: #666; margin-top: -6px; }
-  #snapImg { width: 100%; border-radius: 10px; display: block; background: #eee; }
-  #snapTs { font-size: 12px; color: #666; text-align: center; margin-top: 4px; }
-  #snapWrap { margin: 0; }
-  #status {
-    display: flex; align-items: center; gap: 10px;
-    padding: 10px; border-radius: 8px; background: #f2f2f2;
-    color: #222; font-size: 13px;
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .row > * { flex: 1 1 auto; }
+  .card {
+    padding: 12px 14px; border-radius: 10px;
+    background: #f7f7f7; border: 1px solid #e0e0e0;
   }
-  #dot { width: 12px; height: 12px; border-radius: 50%; background: #888; }
+  .luks-stages {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
+    font-size: 12px; margin-top: 6px;
+  }
+  .stage {
+    padding: 10px; border-radius: 8px;
+    background: #fff; border: 1px solid #e0e0e0;
+    display: flex; flex-direction: column; gap: 4px;
+    opacity: .45; transition: opacity .3s, background .3s, border-color .3s;
+  }
+  .stage.active { opacity: 1; }
+  .stage-title { font-weight: 600; font-size: 13px; }
+  .stage-note { color: var(--muted); line-height: 1.35; }
+  .stage-1.active { background: #d4edda; border-color: #82c495; }
+  .stage-2.active { background: #fff3cd; border-color: #d9b74a; }
+  .stage-3.active { background: #1c1c1c; border-color: #e74c3c; color: #fff; }
+  .stage-3.active .stage-note { color: #eee; }
+
+  #snapImg { max-width: 100%; border-radius: 8px; display: block; background: #eee; }
+  #snapTs  { font-size: 11px; color: var(--muted); text-align: center; margin-top: 4px; }
+  #snapWrap { margin: 0; }
+
+  #dot { width: 12px; height: 12px; border-radius: 50%; background: #888; display: inline-block; }
   #dot.on { background: #e74c3c; animation: blink 1s infinite; }
   @keyframes blink { 50% { opacity: .2; } }
-  #luksStatus {
-    padding: 9px 12px; border-radius: 8px; font-size: 13px;
-    display: flex; align-items: center; gap: 8px;
+
+  .filesTable { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .filesTable th, .filesTable td {
+    text-align: left; padding: 6px 8px; border-bottom: 1px solid #ececec;
   }
-  .luks-mounted   { background: #d4edda; color: #155724; }
-  .luks-unmounted { background: #fff3cd; color: #856404; }
-  .luks-destroyed { background: #1c1c1c; color: #e74c3c; font-weight: 600; }
-  .luks-unknown   { background: #f2f2f2; color: #666; }
-  #log { font-size: 11px; color: #888; word-break: break-all; min-height: 14px; }
+  .filesTable th { color: var(--muted); font-weight: 600; }
+  .filesTable a { color: #2980b9; text-decoration: none; }
+  .filesEmpty { color: var(--muted); font-size: 12px; font-style: italic; padding: 6px 0; }
+  .files-destroyed { color: #e74c3c; font-weight: 600; }
+
+  #logsPane {
+    height: 260px; overflow: auto;
+    background: #0e0e0e; color: #c8ffc8;
+    font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+    padding: 8px 10px; border-radius: 8px;
+    white-space: pre-wrap; word-break: break-all;
+    border: 1px solid #333;
+  }
+  .logsHead {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; color: var(--muted); margin-bottom: 4px;
+  }
+  .logsHead .ldot { width: 8px; height: 8px; border-radius: 50%; background: #888; display: inline-block; }
+  .logsHead .ldot.live { background: #2ecc71; }
+
+  .luks-mounted   { background: #d4edda !important; color: #155724 !important; }
+  .luks-unmounted { background: #fff3cd !important; color: #856404 !important; }
+  .luks-destroyed { background: #1c1c1c !important; color: #e74c3c !important; font-weight: 600; }
+
   #destroyedBanner {
     padding: 14px; border-radius: 10px; background: #1c1c1c;
     color: #fff; font-size: 13px; line-height: 1.5;
     border: 2px solid #e74c3c;
   }
   #destroyedBanner strong { color: #e74c3c; }
-  #logsPane {
-    height: 220px; overflow: auto;
-    background: #1c1c1c; color: #c8ffc8;
-    font-family: ui-monospace, Menlo, monospace; font-size: 11px;
-    padding: 8px 10px; border-radius: 8px;
-    white-space: pre-wrap; word-break: break-all;
-  }
-  .logsHead {
-    display: flex; justify-content: space-between; align-items: center;
-    font-size: 12px; color: #666;
-  }
-  .logsHead .dot { width: 8px; height: 8px; border-radius: 50%; background: #888; display: inline-block; }
-  .logsHead .dot.live { background: #2ecc71; }
+
   #wipeModal {
     position: fixed; inset: 0; background: rgba(0,0,0,.75);
     display: none; align-items: center; justify-content: center;
@@ -73,13 +103,13 @@
   #wipeModal.show { display: flex; }
   #wipeBox {
     background: #fff; color: #222; padding: 20px; border-radius: 14px;
-    max-width: 340px; width: 100%;
-    display: flex; flex-direction: column; gap: 12px;
+    max-width: 380px; width: 100%;
+    display: flex; flex-direction: column; gap: 10px;
   }
-  #wipeBox h2 { margin: 0; font-size: 17px; color: #c0392b; }
+  #wipeBox h3 { margin: 0; font-size: 16px; color: #c0392b; }
   #wipeBox p { margin: 0; font-size: 13px; line-height: 1.5; }
   #wipePass {
-    width: 100%; box-sizing: border-box; padding: 10px;
+    width: 100%; padding: 10px;
     font-family: monospace; font-size: 13px;
     border: 1px solid #bbb; border-radius: 8px;
   }
@@ -95,48 +125,93 @@
   <h1>Pi 3B secure REC · LAN</h1>
 
   <div id="destroyedBanner" hidden>
-    <strong>Директорія знищена</strong><br>
-    LUKS-header затерто, keyslot-и стерто через <code>luksErase</code>.<br>
-    Дані на носії лишаються, але без ключа декрипт математично неможливий.
+    <strong>Директорія знищена</strong> — LUKS-header затерто (<code>dd urandom 16M</code>),
+    keyslot-и стерто (<code>cryptsetup luksErase</code>).
+    Дані на носії лишаються як випадковий шум. Без ключа декрипт математично неможливий.
   </div>
 
-  <div id="luksStatus" class="luks-unknown">
-    <span id="luksDot">◌</span><span id="luksLabel">LUKS: —</span>
+  <!-- ── Пояснення "як воно працює" ───────────────────────────────── -->
+  <div class="card">
+    <h2>Стан контейнера</h2>
+    <div id="luksStatus" class="row" style="align-items:center; padding:8px 10px; border-radius:6px;">
+      <span id="luksDot">◌</span>
+      <span id="luksLabel" style="flex:1">LUKS: —</span>
+    </div>
+    <div class="luks-stages">
+      <div class="stage stage-1" id="stage1">
+        <div class="stage-title">🔓 mounted</div>
+        <div class="stage-note">
+          Ключ у RAM. Файли пишуться зашифрованими на диск, але дешифруються
+          при читанні. Все, що робить ffmpeg, потрапляє у контейнер.
+        </div>
+      </div>
+      <div class="stage stage-2" id="stage2">
+        <div class="stage-title">🔒 unmounted</div>
+        <div class="stage-note">
+          Ключ вивантажено з RAM. Дані на диску, але без пасфрази прочитати
+          не можна. Keyslot-и ще на місці — <em>можна</em> знову відкрити.
+        </div>
+      </div>
+      <div class="stage stage-3" id="stage3">
+        <div class="stage-title">✖ destroyed</div>
+        <div class="stage-note">
+          luksErase затер keyslot-и, dd затер header. Файл-контейнер існує,
+          але без header і keyslot-ів це просто випадкові байти назавжди.
+        </div>
+      </div>
+    </div>
   </div>
 
-  <label class="field" for="preset">Формат</label>
-  <select id="preset">
-    <option value="0">720p @ 30 fps · HW · дефолт</option>
-    <option value="1">480p @ 30 fps · HW · мінімум навантаження</option>
-    <option value="2">1080p @ 15 fps · HW · деталь</option>
-  </select>
-
-  <button id="snap">📸 Знімок</button>
-  <figure id="snapWrap" hidden>
-    <img id="snapImg" alt="snapshot">
-    <figcaption id="snapTs"></figcaption>
-  </figure>
-
-  <button id="rec">● Запис</button>
-  <button id="stop">■ Стоп</button>
-
-  <div id="status"><span id="dot"></span><span id="label">—</span></div>
-
-  <div class="logsHead">
-    <span>Логи сервісу (real-time SSE)</span>
-    <span><span id="logsDot" class="dot"></span> <span id="logsState">idle</span></span>
+  <!-- ── Керування ──────────────────────────────────────────────── -->
+  <div class="card">
+    <h2>Керування записом</h2>
+    <div class="row" style="align-items:center">
+      <select id="preset" style="flex:1">
+        <option value="0">720p @ 30 fps · HW · дефолт</option>
+        <option value="1">480p @ 30 fps · HW · легко</option>
+        <option value="2">1080p @ 15 fps · HW · деталь</option>
+      </select>
+      <span><span id="dot"></span> <span id="label">—</span></span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="snap">📸 Знімок</button>
+      <button id="rec">● Запис</button>
+      <button id="stop">■ Стоп</button>
+    </div>
+    <figure id="snapWrap" hidden style="margin-top:10px">
+      <img id="snapImg" alt="snapshot">
+      <figcaption id="snapTs"></figcaption>
+    </figure>
   </div>
-  <pre id="logsPane"></pre>
 
-  <div id="log"></div>
+  <!-- ── Список записаних відео ─────────────────────────────────── -->
+  <div class="card">
+    <h2>Записані відео у LUKS</h2>
+    <table class="filesTable" id="filesTable">
+      <thead><tr><th>Файл</th><th style="text-align:right">Розмір</th><th>Час</th><th></th></tr></thead>
+      <tbody id="filesBody"></tbody>
+    </table>
+    <div id="filesEmpty" class="filesEmpty">завантаження…</div>
+  </div>
 
+  <!-- ── Live логи сервісу + fs-events ──────────────────────────── -->
+  <div>
+    <div class="logsHead">
+      <span>Логи сервісу + inotify події <code>/mnt/rec</code> (SSE)</span>
+      <span><span id="logsDot" class="ldot"></span> <span id="logsState">idle</span></span>
+    </div>
+    <pre id="logsPane"></pre>
+    <div id="log" style="font-size:11px;color:#888;margin-top:4px"></div>
+  </div>
+
+  <!-- ── Знищення ───────────────────────────────────────────────── -->
   <button id="wipe">🔥 Знищити ключ і директорію</button>
 
   <div id="wipeModal">
     <div id="wipeBox">
-      <h2>Підтвердження знищення</h2>
-      <p>Ця дія <strong>незворотна</strong>. Всі записи в LUKS-контейнері
-      стануть недоступними: keyslot-и і header буде затерто.</p>
+      <h3>Підтвердження знищення</h3>
+      <p>Ця дія <strong>незворотна</strong>. Всі записані відео у LUKS-контейнері
+      стануть недоступними: keyslot-и стерто, header затерто.</p>
       <p>Введи LUKS-пасфразу:</p>
       <input id="wipePass" type="password" autocomplete="off" spellcheck="false"
              placeholder="LUKS passphrase">
@@ -162,7 +237,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 let destroyed = false;
 let recording = false;
 let statusPoller = null;
+let filesPoller = null;
 let logsES = null;
+
+function fmtBytes(b) {
+  if (b < 1024) return b + " B";
+  if (b < 1024*1024) return (b/1024).toFixed(1) + " KB";
+  if (b < 1024*1024*1024) return (b/1024/1024).toFixed(1) + " MB";
+  return (b/1024/1024/1024).toFixed(2) + " GB";
+}
+function fmtTs(sec) {
+  return new Date(sec*1000).toLocaleTimeString("uk-UA");
+}
+
+function setStages(luks) {
+  ["stage1","stage2","stage3"].forEach(id => $(id).classList.remove("active"));
+  if (luks === "mounted")   $("stage1").classList.add("active");
+  if (luks === "unmounted") $("stage2").classList.add("active");
+  if (luks === "destroyed") $("stage3").classList.add("active");
+}
 
 function setRecUi(rec) {
   recording = rec;
@@ -174,18 +267,18 @@ function setRecUi(rec) {
   $("wipe").disabled = destroyed;
 }
 
-function setLuksUi(luks, freeMb) {
+function setLuksUi(luks, freeMb, imgMb) {
   const el = $("luksStatus");
-  el.classList.remove("luks-mounted","luks-unmounted","luks-destroyed","luks-unknown");
+  el.classList.remove("luks-mounted","luks-unmounted","luks-destroyed");
   if (luks === "mounted") {
     el.classList.add("luks-mounted");
     $("luksDot").textContent = "●";
-    $("luksLabel").textContent = `LUKS: змонтований · ${freeMb} MB вільно`;
+    $("luksLabel").textContent = `LUKS: змонтований · ${freeMb} MB вільно з ${imgMb} MB файлу-контейнера`;
     destroyed = false; $("destroyedBanner").hidden = true;
   } else if (luks === "unmounted") {
     el.classList.add("luks-unmounted");
     $("luksDot").textContent = "◐";
-    $("luksLabel").textContent = "LUKS: закритий (не змонтований)";
+    $("luksLabel").textContent = "LUKS: закритий (файл є, ключ у RAM нема)";
     destroyed = false; $("destroyedBanner").hidden = true;
   } else if (luks === "destroyed") {
     el.classList.add("luks-destroyed");
@@ -193,10 +286,10 @@ function setLuksUi(luks, freeMb) {
     $("luksLabel").textContent = "LUKS: ЗНИЩЕНО";
     destroyed = true; $("destroyedBanner").hidden = false;
   } else {
-    el.classList.add("luks-unknown");
     $("luksDot").textContent = "◌";
     $("luksLabel").textContent = "LUKS: —";
   }
+  setStages(luks);
 }
 
 async function pullStatus() {
@@ -204,10 +297,48 @@ async function pullStatus() {
     const r = await fetch("/api/status", {cache: "no-store"});
     if (!r.ok) throw new Error("HTTP " + r.status);
     const j = await r.json();
-    setLuksUi(j.luks, j.free_mb);
+    setLuksUi(j.luks, j.free_mb, j.img_size_mb);
     setRecUi(j.recording);
   } catch (e) {
-    setLabel("нема зв'язку з Pi: " + e.message);
+    setLabel("нема зв'язку: " + e.message);
+  }
+}
+
+async function pullFiles() {
+  try {
+    const r = await fetch("/api/files", {cache: "no-store"});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    const body = $("filesBody");
+    body.innerHTML = "";
+    if (j.files.length === 0) {
+      let msg;
+      if (j.reason === "destroyed") {
+        msg = "директорія знищена — файлів більше немає";
+        $("filesEmpty").className = "filesEmpty files-destroyed";
+      } else if (j.reason === "unmounted") {
+        msg = "LUKS не змонтований — файли недоступні";
+        $("filesEmpty").className = "filesEmpty";
+      } else {
+        msg = "порожньо — натисни ● Запис";
+        $("filesEmpty").className = "filesEmpty";
+      }
+      $("filesEmpty").textContent = msg;
+      $("filesEmpty").hidden = false;
+    } else {
+      $("filesEmpty").hidden = true;
+      for (const f of j.files) {
+        const tr = document.createElement("tr");
+        tr.innerHTML =
+          `<td>${f.name}</td>` +
+          `<td style="text-align:right">${fmtBytes(f.size_bytes)}</td>` +
+          `<td>${fmtTs(f.mtime)}</td>` +
+          `<td><a href="/api/file/${encodeURIComponent(f.name)}" target="_blank">▶</a></td>`;
+        body.appendChild(tr);
+      }
+    }
+  } catch (e) {
+    log("files: " + e.message);
   }
 }
 
@@ -222,11 +353,8 @@ function startLogs() {
   };
   logsES.onmessage = (ev) => {
     pane.textContent += ev.data + "\n";
-    // тримаємо тільки останні ~400 рядків
     const lines = pane.textContent.split("\n");
-    if (lines.length > 400) {
-      pane.textContent = lines.slice(-400).join("\n");
-    }
+    if (lines.length > 400) pane.textContent = lines.slice(-400).join("\n");
     pane.scrollTop = pane.scrollHeight;
   };
   logsES.onerror = () => {
@@ -243,43 +371,36 @@ async function startRec() {
     body: JSON.stringify({preset}),
   });
   const j = await r.json();
-  log(r.ok ? "запис: " + j.msg : "помилка: " + j.msg);
+  log(r.ok ? "REC start: " + j.msg : "помилка: " + j.msg);
   await pullStatus();
 }
 
 async function stopRec() {
   const r = await fetch("/api/stop", {method: "POST"});
   const j = await r.json();
-  log(r.ok ? "стоп: " + j.msg : "помилка: " + j.msg);
+  log(r.ok ? "REC stop: " + j.msg : "помилка: " + j.msg);
   await pullStatus();
+  await pullFiles();
 }
 
 async function snapshot() {
   $("snap").disabled = true;
-  const prev = $("label").textContent;
   setLabel("знімок...");
   try {
-    // додаємо cache-buster
     const url = "/api/snapshot.jpg?t=" + Date.now();
     const r = await fetch(url, {cache: "no-store"});
-    if (!r.ok) {
-      log("знімок помилка: HTTP " + r.status + " " + await r.text());
-      return;
-    }
+    if (!r.ok) { log("знімок: HTTP " + r.status); return; }
     const blob = await r.blob();
-    const oldSrc = $("snapImg").src;
-    if (oldSrc && oldSrc.startsWith("blob:")) URL.revokeObjectURL(oldSrc);
-    const u = URL.createObjectURL(blob);
-    $("snapImg").src = u;
+    const old = $("snapImg").src;
+    if (old && old.startsWith("blob:")) URL.revokeObjectURL(old);
+    $("snapImg").src = URL.createObjectURL(blob);
     $("snapWrap").hidden = false;
-    $("snapTs").textContent =
-      new Date().toLocaleString("uk-UA") + " · " +
-      blob.size.toLocaleString("uk-UA") + " байт";
-    log(`знімок ${blob.size} байт`);
+    $("snapTs").textContent = new Date().toLocaleString("uk-UA") + " · " + fmtBytes(blob.size);
+    log(`знімок ${fmtBytes(blob.size)}`);
   } catch (e) {
     log("знімок помилка: " + e.message);
   } finally {
-    setLabel(prev);
+    setLabel(recording ? "запис…" : "готово");
     $("snap").disabled = destroyed || recording;
   }
 }
@@ -291,11 +412,7 @@ function openWipe() {
   $("wipeModal").classList.add("show");
   setTimeout(() => $("wipePass").focus(), 50);
 }
-
-function closeWipe() {
-  $("wipeModal").classList.remove("show");
-}
-
+function closeWipe() { $("wipeModal").classList.remove("show"); }
 function updateWipeGo() {
   $("wipeGo").disabled = !($("wipeAck").checked && $("wipePass").value.length > 0);
 }
@@ -318,14 +435,14 @@ async function doWipe() {
     }
     closeWipe();
     log("wipe: " + j.msg);
-    // polling статусу до destroyed
     const t0 = Date.now();
     while (Date.now() - t0 < 30000) {
       await sleep(500);
       await pullStatus();
-      if (destroyed) return;
+      await pullFiles();
+      if (destroyed) { log("знищено"); return; }
     }
-    log("timeout: статус не оновився до destroyed — глянь логи");
+    log("timeout: статус не оновився — дивись логи");
   } catch (e) {
     log("wipe помилка: " + e.message);
     $("wipeGo").disabled = false;
@@ -343,12 +460,13 @@ $("wipeGo").onclick = doWipe;
 
 const savedPreset = localStorage.getItem("preset");
 if (savedPreset !== null) $("preset").value = savedPreset;
-$("preset").addEventListener("change", () =>
-  localStorage.setItem("preset", $("preset").value));
+$("preset").addEventListener("change", () => localStorage.setItem("preset", $("preset").value));
 
 pullStatus();
+pullFiles();
 startLogs();
 statusPoller = setInterval(pullStatus, 3000);
+filesPoller  = setInterval(pullFiles, 5000);
 </script>
 </body>
 </html>

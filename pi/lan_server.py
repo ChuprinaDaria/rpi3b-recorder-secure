@@ -381,7 +381,49 @@ def api_status():
         "camera": bool(CAMERA),
         "video_dev": VIDEO_DEV,
         "mnt": MNT,
+        "img": IMG,
+        "img_size_mb": (os.path.getsize(IMG) // (1024*1024)) if os.path.exists(IMG) else 0,
     })
+
+
+@app.get("/api/files")
+def api_files():
+    """Список mp4 у /mnt/rec. Порожній коли LUKS не змонтований чи знищений."""
+    if _luks_status() != "mounted":
+        return jsonify({"files": [], "reason": _luks_status()})
+    try:
+        entries = []
+        for name in os.listdir(MNT):
+            if not name.endswith(".mp4"):
+                continue
+            p = os.path.join(MNT, name)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            entries.append({
+                "name": name,
+                "size_bytes": st.st_size,
+                "mtime": int(st.st_mtime),
+            })
+        entries.sort(key=lambda e: e["mtime"], reverse=True)
+        return jsonify({"files": entries, "reason": "ok"})
+    except OSError as e:
+        return jsonify({"files": [], "reason": f"error: {e}"})
+
+
+@app.get("/api/file/<path:name>")
+def api_file(name):
+    """Віддати сам mp4 (тільки з MNT, без .., без символьних лінків назовні)."""
+    if _luks_status() != "mounted":
+        return "not mounted", 410
+    # захист від traversal
+    if "/" in name or ".." in name or name.startswith("."):
+        return "bad name", 400
+    p = os.path.join(MNT, name)
+    if not os.path.isfile(p):
+        return "not found", 404
+    return send_from_directory(MNT, name, mimetype="video/mp4")
 
 
 @app.get("/api/snapshot.jpg")
