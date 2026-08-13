@@ -1,25 +1,31 @@
 #!/usr/bin/env bash
+# Форк bluebird-works/rpi5-recorder під Pi 3B: auto-record при boot,
+# запис у LUKS-mount, USB webcam.
 set -euo pipefail
 
 REC_USER="${REC_USER:-${SUDO_USER:-pi}}"
 REC_HOME="$(getent passwd "${REC_USER}" | cut -d: -f6)"
-APP_DIR="${REC_HOME}/rpi5-auto"
-SERVICE_NAME="rpi5-auto-recorder.service"
+APP_DIR="${APP_DIR:-${REC_HOME}/rpi3b-auto}"
+SERVICE_NAME="${SERVICE_NAME:-rpi3b-auto-recorder.service}"
+OPSEC_DIR="${OPSEC_DIR:-/opt/opsec}"
+MNT="${MNT:-/mnt/rec}"
 
 apt-get update
-apt-get install -y ffmpeg rpicam-apps
+apt-get install -y --no-install-recommends ffmpeg v4l-utils cryptsetup
 
 usermod -aG video "${REC_USER}" || true
 
+# LUKS bootstrap (idempotent).
+"$(dirname "$0")/luks_setup.sh"
+
 mkdir -p "${APP_DIR}"
 install -m 755 "$(dirname "$0")/autostart.sh" "${APP_DIR}/autostart.sh"
+install -m 755 "$(dirname "$0")/wipe.sh" "${APP_DIR}/wipe.sh"
 chown -R "${REC_USER}:${REC_USER}" "${APP_DIR}"
-mkdir -p "${REC_HOME}/recordings"
-chown "${REC_USER}:${REC_USER}" "${REC_HOME}/recordings"
 
 cat >"/etc/systemd/system/${SERVICE_NAME}" <<UNIT
 [Unit]
-Description=RPi5 auto video recorder
+Description=Pi 3B auto video recorder (LUKS-backed, USB webcam)
 After=multi-user.target
 
 [Service]
@@ -28,13 +34,14 @@ User=${REC_USER}
 Group=video
 WorkingDirectory=${APP_DIR}
 Environment=HOME=${REC_HOME}
-Environment=WIDTH=1920 HEIGHT=1080 FPS=30 BITRATE=10000000
-Environment=AUTOFOCUS_MODE=manual LENS_POSITION=0
+Environment=OPSEC_DIR=${OPSEC_DIR}
+Environment=MNT=${MNT}
+Environment=REC_DIR=${MNT}
+Environment=WIDTH=1280 HEIGHT=720 FPS=30 BITRATE=4000000
 Environment=SEGMENT_SEC=0
 ExecStart=/usr/bin/env bash ${APP_DIR}/autostart.sh
 KillSignal=SIGTERM
 TimeoutStopSec=15
-# always, не on-failure: тут запис має жити поки є живлення.
 Restart=always
 RestartSec=5
 
@@ -47,3 +54,4 @@ systemctl enable --now "${SERVICE_NAME}"
 
 systemctl --no-pager status "${SERVICE_NAME}" || true
 echo "logs: journalctl -u ${SERVICE_NAME} -f"
+echo "NB: сервіс НЕ стартує, поки $MNT не змонтований (запусти luks_setup.sh)"

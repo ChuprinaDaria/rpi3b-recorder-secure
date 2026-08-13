@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>RPi5 REC</title>
+<title>RPi3B secure REC</title>
 <style>
   :root { color-scheme: light dark; }
   body {
@@ -22,6 +22,7 @@
   #snap { background: #16a085; padding: 14px; font-size: 16px; }
   #rec  { background: #c0392b; }
   #stop { background: #555; }
+  #wipe { background: #8e0000; padding: 16px; font-size: 15px; border: 2px solid #4a0000; }
   #reset { background: #d35400; padding: 10px; font-size: 13px; }
   select#preset {
     padding: 12px; font-size: 15px; border-radius: 10px;
@@ -39,11 +40,25 @@
   #dot { width: 14px; height: 14px; border-radius: 50%; background: #888; }
   #dot.on { background: #e74c3c; animation: blink 1s infinite; }
   @keyframes blink { 50% { opacity: .2; } }
+  #luksStatus {
+    padding: 10px 12px; border-radius: 8px; font-size: 13px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .luks-mounted   { background: #d4edda; color: #155724; }
+  .luks-unmounted { background: #fff3cd; color: #856404; }
+  .luks-destroyed { background: #1c1c1c; color: #e74c3c; font-weight: 600; }
+  .luks-unknown   { background: #f2f2f2; color: #666; }
   #log { font-size: 11px; color: #888; word-break: break-all; min-height: 14px; }
   .warn {
     padding: 10px; font-size: 12px; background: #fff3cd; color: #856404;
     border-radius: 8px;
   }
+  #destroyedBanner {
+    padding: 16px; border-radius: 10px; background: #1c1c1c;
+    color: #fff; font-size: 14px; line-height: 1.5;
+    border: 2px solid #e74c3c;
+  }
+  #destroyedBanner strong { color: #e74c3c; }
   details { font-size: 12px; color: #888; }
   details summary { cursor: pointer; padding: 6px 0; }
   details input {
@@ -58,10 +73,40 @@
     border-radius: 8px; text-align: center;
   }
   .debug a { color: #1a5a8a; font-weight: 600; }
+  #wipeModal {
+    position: fixed; inset: 0; background: rgba(0,0,0,.75);
+    display: none; align-items: center; justify-content: center;
+    padding: 20px; z-index: 100;
+  }
+  #wipeModal.show { display: flex; }
+  #wipeBox {
+    background: #fff; color: #222; padding: 20px; border-radius: 14px;
+    max-width: 340px; width: 100%;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  #wipeBox h2 { margin: 0; font-size: 17px; color: #c0392b; }
+  #wipeBox p { margin: 0; font-size: 13px; line-height: 1.5; }
+  #wipePass {
+    width: 100%; box-sizing: border-box; padding: 10px;
+    font-family: monospace; font-size: 13px;
+    border: 1px solid #bbb; border-radius: 8px;
+  }
+  #wipeAckLabel { font-size: 12px; color: #666; display: flex; align-items: center; gap: 8px; }
+  .wipeActions { display: flex; gap: 8px; }
+  .wipeActions button { flex: 1; padding: 12px; font-size: 14px; }
+  #wipeCancel { background: #7f8c8d; }
+  #wipeGo { background: #8e0000; }
+  #wipeGo:disabled { background: #b0b0b0; }
 </style>
 </head>
 <body>
-  <h1>RPi5 відео-реєстратор</h1>
+  <h1>Pi 3B secure REC</h1>
+
+  <div id="destroyedBanner" hidden>
+    <strong>Директорія знищена</strong><br>
+    LUKS-header затерто, keyslot-и стерто через <code>luksErase</code>.<br>
+    Дані на носії лишаються, але без ключа декрипт математично неможливий.
+  </div>
 
   <div id="unsupported" class="warn" hidden>
     Web Bluetooth недоступний. Потрібен Chrome/Edge на Android або desktop
@@ -71,11 +116,15 @@
   <button id="conn">Підключити</button>
   <button id="disc" hidden>Відключити</button>
 
+  <div id="luksStatus" class="luks-unknown">
+    <span id="luksDot">◌</span><span id="luksLabel">LUKS: —</span>
+  </div>
+
   <label class="field" for="preset">Формат</label>
   <select id="preset">
-    <option value="0">1080p @ 30 fps · HW · дефолт</option>
-    <option value="1">720p @ 30 fps · HW · легкий</option>
-    <option value="2">1296p @ 30 fps · SW · треба охолодження</option>
+    <option value="0">720p @ 30 fps · HW · дефолт</option>
+    <option value="1">480p @ 30 fps · HW · мінімум навантаження</option>
+    <option value="2">1080p @ 15 fps · HW · деталь, менший fps</option>
   </select>
 
   <button id="snap" disabled>📸 Знімок для перевірки кадрування</button>
@@ -90,10 +139,12 @@
   <div id="status"><span id="dot"></span><span id="label">не підключено</span></div>
   <div id="log"></div>
 
+  <button id="wipe" disabled>🔥 Знищити ключ і директорію</button>
+
   <details>
     <summary>Налаштування BLE</summary>
     <label>Device name</label>
-    <input id="name" value="RPi5-CAM">
+    <input id="name" value="RPi3B-CAM">
     <label>Service UUID</label>
     <input id="svc" value="12345678-1234-5678-1234-56789abcdef0">
     <label>Command characteristic UUID</label>
@@ -102,6 +153,8 @@
     <input id="chrStatus" value="12345678-1234-5678-1234-56789abcdef2">
     <label>Snapshot characteristic UUID</label>
     <input id="chrSnap" value="12345678-1234-5678-1234-56789abcdef3">
+    <label>Status-ext characteristic UUID</label>
+    <input id="chrStatusExt" value="12345678-1234-5678-1234-56789abcdef4">
     <button id="saveCfg" style="background:#27ae60;padding:10px;font-size:13px">
       Зберегти
     </button>
@@ -115,16 +168,41 @@
        target="_blank" rel="noopener">Google Debugger</a>
   </div>
 
+  <div id="wipeModal">
+    <div id="wipeBox">
+      <h2>Підтвердження знищення</h2>
+      <p>Ця дія <strong>незворотна</strong>. Всі записи в LUKS-контейнері
+      стануть недоступними: keyslot-и і header буде затерто.</p>
+      <p>Введи LUKS-пасфразу (та сама, що при монтуванні):</p>
+      <input id="wipePass" type="password" autocomplete="off" spellcheck="false"
+             placeholder="LUKS passphrase">
+      <label id="wipeAckLabel">
+        <input id="wipeAck" type="checkbox">
+        Розумію, що дані відновити неможливо
+      </label>
+      <div class="wipeActions">
+        <button id="wipeCancel">Скасувати</button>
+        <button id="wipeGo" disabled>Знищити</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 "use strict";
 
 const DEFAULTS = {
-  name: "RPi5-CAM",
+  name: "RPi3B-CAM",
   svc:  "12345678-1234-5678-1234-56789abcdef0",
   chr:  "12345678-1234-5678-1234-56789abcdef1",
-  chrStatus: "12345678-1234-5678-1234-56789abcdef2",
-  chrSnap:   "12345678-1234-5678-1234-56789abcdef3",
+  chrStatus:    "12345678-1234-5678-1234-56789abcdef2",
+  chrSnap:      "12345678-1234-5678-1234-56789abcdef3",
+  chrStatusExt: "12345678-1234-5678-1234-56789abcdef4",
 };
+
+const CMD_STOP  = 0x00;
+const CMD_START = 0x01;
+const CMD_SNAP  = 0x02;
+const CMD_WIPE  = 0x05;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -158,29 +236,93 @@ if (!("bluetooth" in navigator)) {
 let chrCmd = null;
 let chrStatus = null;
 let chrSnap = null;
+let chrStatusExt = null;
 let device = null;
+let statusPoller = null;
+let destroyed = false;
 
 function setConnectedUI(on) {
   $("conn").hidden = on;
   $("disc").hidden = !on;
-  $("rec").disabled = !on;
-  $("stop").disabled = !on;
-  $("snap").disabled = !on || !chrSnap;
+  $("rec").disabled  = !on || destroyed;
+  $("stop").disabled = !on || destroyed;
+  $("snap").disabled = !on || !chrSnap || destroyed;
+  $("wipe").disabled = !on || destroyed;
+}
+
+function setLuksUi(state, freeMb) {
+  const el = $("luksStatus");
+  el.classList.remove("luks-mounted", "luks-unmounted", "luks-destroyed", "luks-unknown");
+  if (state === "mounted") {
+    el.classList.add("luks-mounted");
+    $("luksDot").textContent = "●";
+    $("luksLabel").textContent =
+      `LUKS: змонтований${freeMb != null ? ` · ${freeMb} MB вільно` : ""}`;
+    destroyed = false;
+    $("destroyedBanner").hidden = true;
+  } else if (state === "unmounted") {
+    el.classList.add("luks-unmounted");
+    $("luksDot").textContent = "◐";
+    $("luksLabel").textContent = "LUKS: закритий (не змонтований)";
+    destroyed = false;
+    $("destroyedBanner").hidden = true;
+  } else if (state === "destroyed") {
+    el.classList.add("luks-destroyed");
+    $("luksDot").textContent = "✖";
+    $("luksLabel").textContent = "LUKS: ЗНИЩЕНО";
+    destroyed = true;
+    $("destroyedBanner").hidden = false;
+  } else {
+    el.classList.add("luks-unknown");
+    $("luksDot").textContent = "◌";
+    $("luksLabel").textContent = "LUKS: —";
+    destroyed = false;
+  }
+  // Апдейт disabled-ів після destroyed зміни.
+  const connected = !$("conn").hidden === false; // conn hidden = connected
+  setConnectedUI(!!chrCmd);
+}
+
+async function pollStatusExt() {
+  if (!chrStatusExt) return;
+  try {
+    const v = await chrStatusExt.readValue();
+    if (v.byteLength < 6) return;
+    const rec = v.getUint8(0);
+    const luks = v.getUint8(1); // 0=unmounted,1=mounted,2=destroyed
+    const freeMb = v.getUint32(2, true);
+    setRecUI(rec === 0x01);
+    const luksName = ["unmounted", "mounted", "destroyed"][luks] || "unknown";
+    setLuksUi(luksName, luks === 1 ? freeMb : null);
+  } catch (e) {
+    // ігноруємо: transient BLE errors
+  }
+}
+
+function startStatusPolling() {
+  stopStatusPolling();
+  pollStatusExt();
+  statusPoller = setInterval(pollStatusExt, 3000);
+}
+
+function stopStatusPolling() {
+  if (statusPoller) { clearInterval(statusPoller); statusPoller = null; }
 }
 
 function resetConnectionState() {
   chrCmd = null;
   chrStatus = null;
   chrSnap = null;
+  chrStatusExt = null;
   device = null;
+  stopStatusPolling();
   setConnectedUI(false);
   $("dot").classList.remove("on");
+  setLuksUi("unknown");
 }
 
 async function connect() {
   try {
-    // Якщо є стара сесія — валимо її ДО requestDevice, інакше Pi думає
-    // що ми все ще підключені й наступний коннект висне.
     if (device?.gatt?.connected) {
       try { device.gatt.disconnect(); } catch (_) {}
     }
@@ -189,6 +331,7 @@ async function connect() {
     const svc  = cfg.svc.toLowerCase();
     const cuid = cfg.chr.toLowerCase();
     const suid = cfg.chrStatus.toLowerCase();
+    const seid = cfg.chrStatusExt.toLowerCase();
 
     device = await navigator.bluetooth.requestDevice({
       filters: [{ name: cfg.name }],
@@ -201,9 +344,6 @@ async function connect() {
       resetConnectionState();
     });
 
-    // BlueZ/адаптер інколи розриває GATT-сесію відразу після connect (адаптер
-    // не встиг доскинути ATT-таблицю). Один retry рятує в 90% випадків, а
-    // подальші вже не мають сенсу — краще користувачу натиснути ще раз.
     let service;
     try {
       const gatt = await device.gatt.connect();
@@ -219,11 +359,10 @@ async function connect() {
     try { chrStatus = await service.getCharacteristic(suid); } catch (_) {}
     try {
       chrSnap = await service.getCharacteristic(cfg.chrSnap.toLowerCase());
-      log("snap: ok");
-    } catch (e) {
-      chrSnap = null;
-      log("snap: недоступний (" + e.message + ")");
-    }
+    } catch (_) { chrSnap = null; }
+    try {
+      chrStatusExt = await service.getCharacteristic(seid);
+    } catch (_) { chrStatusExt = null; }
 
     if (chrStatus) {
       const v = await chrStatus.readValue();
@@ -233,6 +372,7 @@ async function connect() {
     }
 
     setConnectedUI(true);
+    startStatusPolling();
     log("підключено до " + device.name);
   } catch (e) {
     log("помилка: " + e.message);
@@ -252,12 +392,42 @@ function disconnect() {
 
 async function sendStart(preset) {
   if (!chrCmd) return;
-  await chrCmd.writeValue(Uint8Array.of(0x01, preset & 0xff));
+  await chrCmd.writeValue(Uint8Array.of(CMD_START, preset & 0xff));
 }
 
 async function sendStop() {
   if (!chrCmd) return;
-  await chrCmd.writeValue(Uint8Array.of(0x00));
+  await chrCmd.writeValue(Uint8Array.of(CMD_STOP));
+}
+
+async function sendWipe(passUtf8) {
+  if (!chrCmd) return;
+  const enc = new TextEncoder().encode(passUtf8);
+  // 1 байт opcode + пасфраза. BLE MTU ~180 корисних байт — вистачає.
+  if (enc.length > 178) {
+    log("пасфраза задовга для BLE (>178 байт)");
+    return;
+  }
+  const payload = new Uint8Array(1 + enc.length);
+  payload[0] = CMD_WIPE;
+  payload.set(enc, 1);
+  await chrCmd.writeValue(payload);
+}
+
+function openWipeModal() {
+  $("wipePass").value = "";
+  $("wipeAck").checked = false;
+  $("wipeGo").disabled = true;
+  $("wipeModal").classList.add("show");
+  setTimeout(() => $("wipePass").focus(), 50);
+}
+
+function closeWipeModal() {
+  $("wipeModal").classList.remove("show");
+}
+
+function updateWipeGo() {
+  $("wipeGo").disabled = !($("wipeAck").checked && $("wipePass").value.length > 0);
 }
 
 async function snapshot() {
@@ -266,7 +436,7 @@ async function snapshot() {
   const prevLabel = $("label").textContent;
   setLabel("знімок...");
   try {
-    await chrCmd.writeValue(Uint8Array.of(0x02));
+    await chrCmd.writeValue(Uint8Array.of(CMD_SNAP));
     const chunks = [];
     let total = null;
     const started = Date.now();
@@ -276,7 +446,6 @@ async function snapshot() {
       if (buf.length < 4) { await sleep(150); continue; }
       const seq = buf[0] | (buf[1] << 8);
       const chunkTotal = buf[2] | (buf[3] << 8);
-      // total=0 = ще не готовий, чекаємо
       if (chunkTotal === 0) { await sleep(150); continue; }
       if (total === null) {
         if (seq !== 0) { log("skew: seq=" + seq); break; }
@@ -306,7 +475,7 @@ async function snapshot() {
     log("помилка знімка: " + e.message);
   } finally {
     setLabel(prevLabel);
-    $("snap").disabled = $("dot").classList.contains("on") || !chrSnap;
+    $("snap").disabled = destroyed || $("dot").classList.contains("on") || !chrSnap;
   }
 }
 
@@ -318,9 +487,6 @@ function concatChunks(chunks) {
   return out;
 }
 
-// Pi думає що ми ще підключені поки не отримає GATT-disconnect. Без цього
-// закриття вкладки лишає mostro-connection, і наступного разу потрібно чистити
-// site data. Робимо явний disconnect при закритті.
 window.addEventListener("pagehide", () => {
   if (device?.gatt?.connected) {
     try { device.gatt.disconnect(); } catch (_) {}
@@ -333,14 +499,6 @@ if (savedPreset !== null) $("preset").value = savedPreset;
 $("preset").addEventListener("change", () =>
   localStorage.setItem("preset", $("preset").value));
 
-// Скидання для юзерів, які не вміють чистити кеш браузера / забувати пристрій
-// у BT-налаштуваннях телефона. Робить максимум що дозволяє Web Bluetooth API:
-// 1) розриває GATT-сесію (щоб Pi не думав, що ми ще підключені),
-// 2) через device.forget() (Chrome 114+) прибирає пристрій зі списку дозволених
-//    для цього origin — Chrome при наступному коннекті знову покаже picker,
-// 3) hard-reload сторінки з обходом кешу.
-// Кеш ОС/Bluetooth-стеку (GATT services cache) з JS почистити неможливо —
-// це вирішує тільки «забути пристрій» у системних налаштуваннях BT.
 async function fullReset() {
   $("reset").disabled = true;
   try {
@@ -351,7 +509,6 @@ async function fullReset() {
       try { await device.forget(); log("пристрій забуто у браузері"); } catch (_) {}
     }
   } finally {
-    // невелика пауза щоб disconnect дійшов до Pi
     setTimeout(() => location.reload(), 300);
   }
 }
@@ -365,13 +522,41 @@ $("rec").onclick  = async () => {
   const preset = parseInt($("preset").value, 10) || 0;
   await sendStart(preset);
   setRecUI(true);
-  // Під час запису rpicam-jpeg не працює — камера зайнята.
   $("snap").disabled = true;
 };
 $("stop").onclick = async () => {
   await sendStop();
   setRecUI(false);
   $("snap").disabled = !chrSnap;
+};
+
+$("wipe").onclick = openWipeModal;
+$("wipeCancel").onclick = closeWipeModal;
+$("wipePass").addEventListener("input", updateWipeGo);
+$("wipeAck").addEventListener("change", updateWipeGo);
+$("wipeGo").onclick = async () => {
+  const pass = $("wipePass").value;
+  $("wipeGo").disabled = true;
+  log("wipe: надсилаю BLE-пакет...");
+  try {
+    await sendWipe(pass);
+    closeWipeModal();
+    setLabel("знищення...");
+    // Пі має ~1-3 с на luksErase + dd. Poll кожні 500 мс.
+    const started = Date.now();
+    while (Date.now() - started < 30000) {
+      await sleep(500);
+      await pollStatusExt();
+      if (destroyed) {
+        log("знищено");
+        return;
+      }
+    }
+    log("timeout: STATUS не показав destroyed — перевір логи Pi");
+  } catch (e) {
+    log("wipe помилка: " + e.message);
+    $("wipeGo").disabled = false;
+  }
 };
 </script>
 </body>
