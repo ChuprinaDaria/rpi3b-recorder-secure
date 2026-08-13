@@ -125,18 +125,29 @@
   <h1>Pi 3B secure REC · LAN</h1>
 
   <div id="destroyedBanner" hidden>
-    <strong>Директорія знищена</strong> — LUKS-header затерто (<code>dd urandom 16M</code>),
-    keyslot-и стерто (<code>cryptsetup luksErase</code>).
-    Дані на носії лишаються як випадковий шум. Без ключа декрипт математично неможливий.
+    <strong>Периметр знищено</strong> — усі LUKS-контейнери у <code>/opt/opsec/</code>
+    затерто: <code>rec.img</code> (відео) + <code>cv.img</code> (cv-tracking + venv).
+    Keyslot-и стерто (<code>cryptsetup luksErase</code>), header затерто
+    (<code>dd urandom 16M</code>). Дані на носії лишаються випадковим шумом —
+    без ключа декрипт математично неможливий.
   </div>
 
   <!-- ── Пояснення "як воно працює" ───────────────────────────────── -->
   <div class="card">
-    <h2>Стан контейнера</h2>
+    <h2>Стан LUKS-контейнерів</h2>
     <div id="luksStatus" class="row" style="align-items:center; padding:8px 10px; border-radius:6px;">
       <span id="luksDot">◌</span>
       <span id="luksLabel" style="flex:1">LUKS: —</span>
     </div>
+    <table style="width:100%; font-size:12px; border-collapse:collapse; margin-top:6px">
+      <thead><tr>
+        <th style="text-align:left; color:#666; padding:4px 6px">Контейнер</th>
+        <th style="text-align:left; color:#666; padding:4px 6px">Файл</th>
+        <th style="text-align:left; color:#666; padding:4px 6px">Стан</th>
+        <th style="text-align:right; color:#666; padding:4px 6px">Розмір</th>
+      </tr></thead>
+      <tbody id="containersBody"></tbody>
+    </table>
     <div class="luks-stages">
       <div class="stage stage-1" id="stage1">
         <div class="stage-title">🔓 mounted</div>
@@ -155,8 +166,8 @@
       <div class="stage stage-3" id="stage3">
         <div class="stage-title">✖ destroyed</div>
         <div class="stage-note">
-          luksErase затер keyslot-и, dd затер header. Файл-контейнер існує,
-          але без header і keyslot-ів це просто випадкові байти назавжди.
+          Обидва контейнери (rec.img + cv.img) втратили keyslot-и і header.
+          Файли існують як випадковий шум. Ключ математично неможливо відновити.
         </div>
       </div>
     </div>
@@ -210,9 +221,14 @@
   <div id="wipeModal">
     <div id="wipeBox">
       <h3>Підтвердження знищення</h3>
-      <p>Ця дія <strong>незворотна</strong>. Всі записані відео у LUKS-контейнері
-      стануть недоступними: keyslot-и стерто, header затерто.</p>
-      <p>Введи LUKS-пасфразу:</p>
+      <p>Ця дія <strong>незворотна</strong> і знищує <strong>ВЕСЬ секретний периметр</strong>:</p>
+      <ul style="margin:0; padding-left:18px; font-size:13px; line-height:1.5">
+        <li><code>/opt/opsec/rec.img</code> — записані відео</li>
+        <li><code>/opt/opsec/cv.img</code> — cv-tracking код і venv</li>
+      </ul>
+      <p>Обидва контейнери: keyslot-и стерто (<code>luksErase</code>),
+      header затерто (<code>dd urandom 16M</code>).</p>
+      <p>Введи LUKS-пасфразу від <code>rec.img</code>:</p>
       <input id="wipePass" type="password" autocomplete="off" spellcheck="false"
              placeholder="LUKS passphrase">
       <label id="wipeAckLabel">
@@ -292,6 +308,31 @@ function setLuksUi(luks, freeMb, imgMb) {
   setStages(luks);
 }
 
+function stateBadge(s) {
+  if (s === "mounted")   return `<span style="color:#155724">● mounted</span>`;
+  if (s === "unmounted") return `<span style="color:#856404">◐ closed</span>`;
+  if (s === "destroyed") return `<span style="color:#e74c3c;font-weight:600">✖ destroyed</span>`;
+  return `<span style="color:#888">◌ n/a</span>`;
+}
+
+function renderContainers(cs) {
+  const body = $("containersBody");
+  const rows = [
+    ["🎬 recorder", cs.rec],
+    ["🧠 cv-tracking", cs.cv],
+  ];
+  body.innerHTML = "";
+  for (const [label, c] of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td style="padding:4px 6px">${label}</td>` +
+      `<td style="padding:4px 6px"><code style="font-size:11px">${c.img}</code></td>` +
+      `<td style="padding:4px 6px">${c.exists ? stateBadge(c.luks) : `<span style="color:#888">— відсутній</span>`}</td>` +
+      `<td style="padding:4px 6px;text-align:right">${c.img_size_mb} MB</td>`;
+    body.appendChild(tr);
+  }
+}
+
 async function pullStatus() {
   try {
     const r = await fetch("/api/status", {cache: "no-store"});
@@ -299,6 +340,7 @@ async function pullStatus() {
     const j = await r.json();
     setLuksUi(j.luks, j.free_mb, j.img_size_mb);
     setRecUi(j.recording);
+    if (j.containers) renderContainers(j.containers);
   } catch (e) {
     setLabel("нема зв'язку: " + e.message);
   }

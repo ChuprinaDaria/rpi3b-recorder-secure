@@ -371,9 +371,39 @@ def index():
     return send_from_directory(STATIC_DIR, "index.html")
 
 
+def _container_status(img_path, mnt_path):
+    """Універсальний статус довільного LUKS-контейнера."""
+    if not os.path.exists(img_path):
+        return {"exists": False, "luks": "unknown",
+                "img_size_mb": 0, "free_mb": 0}
+    size_mb = os.path.getsize(img_path) // (1024 * 1024)
+    is_luks = subprocess.run(
+        ["cryptsetup", "isLuks", img_path],
+        capture_output=True,
+    ).returncode == 0
+    if not is_luks:
+        return {"exists": True, "luks": "destroyed",
+                "img_size_mb": size_mb, "free_mb": 0}
+    mounted = os.path.ismount(mnt_path)
+    free_mb = 0
+    if mounted:
+        try:
+            st = os.statvfs(mnt_path)
+            free_mb = (st.f_bavail * st.f_frsize) // (1024 * 1024)
+        except OSError:
+            pass
+    return {"exists": True,
+            "luks": "mounted" if mounted else "unmounted",
+            "img_size_mb": size_mb, "free_mb": free_mb}
+
+
 @app.get("/api/status")
 def api_status():
     lst = _luks_status()
+    rec_c = _container_status(IMG, MNT)
+    cv_c = _container_status("/opt/opsec/cv.img", "/mnt/cv")
+    # Загальний perimeter status = destroyed якщо marker є, mounted якщо rec mounted,
+    # інакше беремо з rec-контейнера.
     return jsonify({
         "recording": state["recording"],
         "luks": lst,
@@ -382,7 +412,11 @@ def api_status():
         "video_dev": VIDEO_DEV,
         "mnt": MNT,
         "img": IMG,
-        "img_size_mb": (os.path.getsize(IMG) // (1024*1024)) if os.path.exists(IMG) else 0,
+        "img_size_mb": rec_c["img_size_mb"],
+        "containers": {
+            "rec": {"img": IMG, "mnt": MNT, **rec_c},
+            "cv":  {"img": "/opt/opsec/cv.img", "mnt": "/mnt/cv", **cv_c},
+        },
     })
 
 
